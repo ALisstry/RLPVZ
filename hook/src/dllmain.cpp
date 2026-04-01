@@ -118,6 +118,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved) {
         
         // 先安装Hook（这样游戏就不会卡住）
         InstallHook();
+
+        // 允许窗口失焦时继续运行
+        PVZ::SetBackgroundRunning(true);
         
         // 然后初始化TCP服务器（端口从环境变量获取）
         g_bridgeInitialized = Bridge::Initialize(GetHookPort());
@@ -125,6 +128,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved) {
         
     case DLL_PROCESS_DETACH:
         // DLL被卸载
+        PVZ::SetBackgroundRunning(false);
         UninstallHook();
         Bridge::Shutdown();
         break;

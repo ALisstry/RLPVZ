@@ -13,6 +13,9 @@ namespace Addr {
     constexpr uintptr_t SEED_CHOOSER = 0x774;
     constexpr uintptr_t MOUSE_WINDOW = 0x320;  // MouseWindow pointer
     constexpr uintptr_t TICK_MS = 0x454;       // 每帧毫秒数 (默认10, 越小越快)
+    constexpr uintptr_t BACKGROUND_RUNNING_PATCH = 0x0054EBA8; // 后台失焦不暂停设置地址
+    constexpr uint16_t BACKGROUND_RUNNING_ON = 0x00EB;
+    constexpr uint16_t BACKGROUND_RUNNING_OFF = 0x2E74;
     
     constexpr uintptr_t SUN = 0x5560;
     constexpr uintptr_t WAVE = 0x557C;
@@ -105,6 +108,21 @@ bool SetGameSpeed(float speed) {
     int ms = (int)(10.0f / speed + 0.5f);
     if (ms < 1) ms = 1;  // 最小1ms = 10x速度
     return SetTickMs(ms);
+}
+
+bool SetBackgroundRunning(bool on) {
+    DWORD oldProtect = 0;
+    auto addr = reinterpret_cast<void*>(Addr::BACKGROUND_RUNNING_PATCH);
+    if (!VirtualProtect(addr, sizeof(uint16_t), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        return false;
+    }
+
+    *reinterpret_cast<uint16_t*>(addr) = on ? Addr::BACKGROUND_RUNNING_ON : Addr::BACKGROUND_RUNNING_OFF;
+
+    DWORD restoreProtect = 0;
+    VirtualProtect(addr, sizeof(uint16_t), oldProtect, &restoreProtect);
+    FlushInstructionCache(GetCurrentProcess(), addr, sizeof(uint16_t));
+    return true;
 }
 
 // GetFrameMultiplier - 获取帧倍增数

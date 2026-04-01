@@ -62,6 +62,7 @@ int GetTickMs();                              // 获取每帧毫秒数 (默认10
 bool SetTickMs(int ms);                       // 设置每帧毫秒数 (最小1, 无上限)
 float GetGameSpeed();                         // 获取游戏速度倍率 (10/TickMs)
 bool SetGameSpeed(float speed);               // 设置游戏速度 (0.05-10倍)
+bool SetBackgroundRunning(bool on);          // 允许窗口失焦时继续运行
 
 // 帧倍增 - 在一帧内执行多次游戏逻辑更新，实现超高速
 int GetFrameMultiplier();                     // 获取帧倍增数 (默认1)
