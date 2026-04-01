@@ -220,6 +220,18 @@ def add_ddqn_args(group):
         help="DDQN checkpoint 保存频率（按 episode 计，0 表示禁用）",
     )
     group.add_argument(
+        "--ddqn_plot_freq",
+        type=int,
+        default=20,
+        help="DDQN 训练曲线刷新频率（按 episode 计，0 表示禁用）",
+    )
+    group.add_argument(
+        "--ddqn_plot_path",
+        type=str,
+        default="models_output/ddqn/training_curve.png",
+        help="DDQN 训练曲线输出路径",
+    )
+    group.add_argument(
         "--ddqn_save_path",
         type=str,
         default="models/ddqn_model.pt",

@@ -34,8 +34,10 @@ def main():
     if not train_utils.ensure_game_ready(args):
         return
 
+    training_metrics_callback = train_utils.build_training_metrics_callback(args)
+
     if args.algo == "ddqn":
-        train_ddqn(args)
+        train_ddqn(args, metrics_callback=training_metrics_callback)
         return
     else:  # ppo
         # 创建环境
@@ -58,3 +60,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

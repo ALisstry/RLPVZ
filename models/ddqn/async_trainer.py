@@ -189,7 +189,7 @@ def _reset_env_with_retry(env, worker_id, instance, stats_queue, stop_event):
 
 
 class AsyncDDQNTrainer:
-    def __init__(self, args, instances, network):
+    def __init__(self, args, instances, network, metrics_callback=None):
         self.args = args
         self.instances = instances
         self.network = network
@@ -217,6 +217,8 @@ class AsyncDDQNTrainer:
         self.active_workers = set(range(len(instances)))
         self.dead_workers = {}
         self.checkpoint_freq = max(0, int(getattr(args, "ddqn_checkpoint_freq", 0)))
+        self.eval_episodes = []
+        self.metrics_callback = metrics_callback
 
     def train(
         self,
@@ -320,6 +322,7 @@ class AsyncDDQNTrainer:
 
         stop_event.set()
         self._drain_stats_queue(stats_queue, workers, evaluate_frequency, evaluate_n_iter)
+        self._emit_training_metrics(force=True)
         if self.solved:
             print(f"\nEnvironment solved in {self.episode_count} episodes.")
         else:
@@ -396,6 +399,8 @@ class AsyncDDQNTrainer:
                     flush=True,
                 )
 
+            self._emit_training_metrics()
+
             progress_line = (
                 "Episode {:d} Mean Rewards {:.2f}\t\t Mean Iterations {:.2f}\t\t".format(
                     self.episode_count, mean_rewards, mean_iteration
@@ -419,11 +424,30 @@ class AsyncDDQNTrainer:
                 )
                 self.real_rewards.append(avg_score)
                 self.real_iterations.append(avg_iter)
+                self.eval_episodes.append(self.episode_count)
                 print(
                     f"\n[Eval] Episode {self.episode_count} | avg_score={avg_score:.2f} | avg_iter={avg_iter:.2f}",
                     flush=True,
                 )
                 print("\r" + progress_line, end="", flush=True)
+
+    def _emit_training_metrics(self, force=False):
+        if self.metrics_callback is None:
+            return
+
+        snapshot = {
+            "algo": "ddqn",
+            "step_count": self.episode_count,
+            "episode_count": self.episode_count,
+            "episode_rewards": list(self.training_rewards),
+            "mean_rewards": list(self.mean_training_rewards),
+            "mean_iterations": list(self.mean_training_iterations),
+            "eval_steps": list(self.eval_episodes),
+            "eval_rewards": list(self.real_rewards),
+            "losses": list(self.training_loss),
+            "force": force,
+        }
+        self.metrics_callback(snapshot)
 
     def calculate_loss(self, batch):
         states, actions, rewards, dones, next_states, masks, next_masks = [
@@ -489,3 +513,4 @@ class AsyncDDQNTrainer:
                 flush=True,
             )
             return None
+

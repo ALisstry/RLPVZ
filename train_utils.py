@@ -524,6 +524,32 @@ def save_runtime_checkpoint(args, model=None, env=None, network=None, tag=None):
     return cached_path
 
 
+def build_training_metrics_callback(args):
+    if args.algo != "ddqn" or getattr(args, "ddqn_plot_freq", 0) <= 0:
+        return None
+
+    from utils.training_plotter import TrainingCurvePlotter
+
+    plotter = TrainingCurvePlotter(
+        output_path=getattr(args, "ddqn_plot_path", "models_output/ddqn/training_curve.png"),
+        refresh_freq=getattr(args, "ddqn_plot_freq", 20),
+    )
+
+    def on_metrics(snapshot):
+        plotter.maybe_update(
+            step_count=snapshot["step_count"],
+            episode_rewards=snapshot["episode_rewards"],
+            mean_rewards=snapshot["mean_rewards"],
+            mean_iterations=snapshot["mean_iterations"],
+            eval_steps=snapshot["eval_steps"],
+            eval_rewards=snapshot["eval_rewards"],
+            losses=snapshot["losses"],
+            force=snapshot.get("force", False),
+        )
+
+    return on_metrics
+
+
 def print_gpu_memory():
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -575,3 +601,4 @@ def train_model(model, env, args, callbacks):
     finally:
         save_runtime_checkpoint(args, model=model, env=env)
         env.close()
+

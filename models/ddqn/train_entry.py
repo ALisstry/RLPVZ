@@ -23,7 +23,7 @@ def _build_ddqn_env(args, instance=None):
     return DDQNEnvAdapter(env)
 
 
-def train_ddqn(args):
+def train_ddqn(args, metrics_callback=None):
     import torch
     import train_utils
     from .async_trainer import AsyncDDQNTrainer
@@ -42,7 +42,7 @@ def train_ddqn(args):
         state_dict = torch.load(args.ddqn_load_path, map_location=device)
         network.load_state_dict(state_dict)
 
-    trainer = AsyncDDQNTrainer(args, instances, network)
+    trainer = AsyncDDQNTrainer(args, instances, network, metrics_callback=metrics_callback)
 
     try:
         trainer.train(
@@ -55,3 +55,4 @@ def train_ddqn(args):
     finally:
         train_utils.save_runtime_checkpoint(args, network=network)
         env.close()
+
