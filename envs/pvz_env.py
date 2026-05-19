@@ -1334,26 +1334,32 @@ class PVZEnv(gym.Env):
     def _check_terminated(self, game_state) -> Tuple[bool, bool]:
         """
         检查是否终止
-        
+
         终止条件:
+        - 小推车丢失 (state != READY): 失败
         - 僵尸 X < -70: 失败 (僵尸进屋)
         - level_end_countdown > 0: 胜利 (关卡即将结束)
-        
+
         Returns:
             (terminated, win)
         """
+        # 检查失败条件: 小推车丢失 (触发或被压扁)
+        for lm in game_state.lawnmowers:
+            if lm.state != 1:  # 非 READY 状态 = 已丢失
+                return True, False
+
         # 检查失败条件: 僵尸进屋 (X < -70)
         if self._check_lawnmower_fail(game_state):
             return True, False
-        
+
         # 检查胜利条件: level_end_countdown > 0
         level_end_cd = getattr(game_state, 'level_end_countdown', 0)
-        
+
         if level_end_cd > 0:
             # 只有在最后一波(或更后)才算真正的胜利
             if game_state.total_waves > 0 and game_state.wave >= game_state.total_waves:
                 return True, True
-        
+
         return False, False
     
     def _update_last_state(self, game_state, potential=None):
