@@ -46,15 +46,29 @@ class SimPVZEnv:
         self._scene = Scene(self.plant_deck, WaveZombieSpawner())
         self._steps = 0
         self._last_mask = None
+        self._collect_render = False
+        self._render_data = []  # stored per-frame render info for last episode
 
     @property
     def steps(self):
         return self._steps
 
+    def enable_render_collection(self):
+        self._collect_render = True
+
+    def disable_render_collection(self):
+        self._collect_render = False
+
+    @property
+    def render_data(self):
+        return self._render_data
+
     def reset(self, **kwargs):
         self._scene = Scene(self.plant_deck, WaveZombieSpawner())
         self._steps = 0
         self._last_mask = self.mask_available_actions()
+        if self._collect_render:
+            self._render_data = [self._capture_frame()]
         return self._build_state()
 
     def step(self, action):
@@ -63,10 +77,14 @@ class SimPVZEnv:
 
         # Advance simulation until player can act or game ends
         self._scene.step()
+        if self._collect_render:
+            self._render_data.append(self._capture_frame())
         reward = self._scene.score
         episode_over = self._scene._chrono > config.MAX_FRAMES
         while (not self._scene.move_available()) and (not episode_over):
             self._scene.step()
+            if self._collect_render:
+                self._render_data.append(self._capture_frame())
             episode_over = self._scene._chrono > config.MAX_FRAMES
             reward += self._scene.score
 
@@ -125,3 +143,29 @@ class SimPVZEnv:
             move = Move(self._plant_names[plant_idx], lane, pos)
             if move.is_valid(self._scene):
                 move.apply_move(self._scene)
+
+    def _capture_frame(self):
+        """Capture current scene state for later visualization."""
+        zombies = [[] for _ in range(config.N_LANES)]
+        plants = [[] for _ in range(config.N_LANES)]
+        projectiles = [[] for _ in range(config.N_LANES)]
+        for z in self._scene.zombies:
+            zombies[z.lane].append((z.__class__.__name__, int(z.pos), z.get_offset(), z.hp))
+        for p in self._scene.plants:
+            plants[p.lane].append((p.__class__.__name__, p.pos, p.hp))
+        for proj in self._scene.projectiles:
+            if hasattr(proj, '_render') and proj._render():
+                offset = getattr(proj, '_offset', 0)
+                pos = getattr(proj, '_pos', proj.pos if hasattr(proj, 'pos') else 0)
+                projectiles[proj.lane].append((proj.__class__.__name__, int(pos), float(offset)))
+        return {
+            "zombies": zombies,
+            "plants": plants,
+            "projectiles": projectiles,
+            "sun": self._scene.sun,
+            "score": self._scene.score,
+            "cooldowns": {n: int(self._scene.plant_cooldowns[n] / config.FPS) + 1
+                          for n in self._plant_names},
+            "time": int(self._scene._chrono / config.FPS),
+            "lives": self._scene.lives,
+        }

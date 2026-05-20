@@ -45,7 +45,7 @@ def evaluate(env, network, n_iter=100, verbose=True):
 
 
 def train_sim_ddqn(
-    max_episodes=50000,
+    max_episodes=100000,
     buffer_size=100000,
     burn_in=1000,
     batch_size=200,
@@ -162,6 +162,9 @@ def train_sim_ddqn(
     np.save(save_path.replace(".pt", "_eval_rewards.npy"), np.array(real_rewards))
     print("Training complete.")
 
+    # --- Visualize one episode with the trained agent ---
+    _visualize_episode(env, network)
+
 
 def _calculate_loss(network, target_network, batch, gamma, env):
     states, actions, rewards, dones, next_states, masks, next_masks = [
@@ -187,6 +190,31 @@ def _calculate_loss(network, target_network, batch, gamma, env):
     qvals_next[dones_t] = 0
     expected_qvals = gamma * qvals_next + rewards_t
     return torch.nn.MSELoss()(qvals, expected_qvals)
+
+
+def _visualize_episode(env, network):
+    """Play one episode with render collection and show replay."""
+    from simenv.render import replay_episode
+
+    env.enable_render_collection()
+    state = env.reset()
+    done = False
+    total_reward = 0.0
+    while not done:
+        mask = env.mask_available_actions()
+        qvals = network.get_qvals(state)
+        mask_t = torch.as_tensor(mask, dtype=torch.bool, device=qvals.device)
+        qvals = qvals.clone()
+        qvals[~mask_t] = qvals.min()
+        action = torch.max(qvals, dim=-1)[1].item()
+        state, reward, done, _ = env.step(action)
+        total_reward += reward
+    env.disable_render_collection()
+
+    print(f"\nReplay episode: {len(env.render_data)} frames, "
+          f"reward={total_reward:.0f}")
+    replay_episode(env.render_data, fps=15,
+                   title=f"SimPVZ Trained Agent — Reward: {total_reward:.0f}")
 
 
 if __name__ == "__main__":
