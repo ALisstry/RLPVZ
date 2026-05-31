@@ -14,8 +14,10 @@
 
 ## 仓库重点
 - `train.py`：训练总入口。
-- `train_args.py` / `train_utils.py`：参数、训练准备与通用流程。
+- `train_args.py`：命令行参数。
+- `training/`：训练生命周期、日志、checkpoint、metrics 和运行准备。
 - `envs/`：环境实现。
+- `models/ppo/`：PPO 环境、模型构建和训练入口。
 - `models/ddqn/`：DDQN 相关实现。
 - `callbacks/`：PPO/训练回调。
 - `hook/` / `hook_client/`：DLL 注入与 Hook 通信。
