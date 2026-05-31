@@ -14,15 +14,28 @@ from stable_baselines3.common.callbacks import BaseCallback
 class AsyncSingleModelCallback(BaseCallback):
     """每隔一定步数异步保存模型，只保留一个文件 (覆盖)，避免阻塞训练"""
 
-    def __init__(self, save_freq: int, save_path: str, verbose=0):
+    def __init__(
+        self,
+        save_freq: int,
+        save_path: str | None = None,
+        checkpoint=None,
+        verbose=0,
+    ):
         super().__init__(verbose)
         self.save_freq = save_freq
         self.save_path = save_path
+        self.checkpoint = checkpoint
         self.save_thread = None
 
-    def _save_model_thread(self, model, save_path):
+    def _save_model_thread(self, model, save_path, env):
         """后台保存线程"""
         try:
+            if self.checkpoint is not None:
+                self.checkpoint.save(model=model, env=env)
+                return
+
+            if save_path is None:
+                raise ValueError("save_path is required when checkpoint is not provided")
             model.save(save_path)
 
             # 保存 VecNormalize 统计信息
@@ -54,7 +67,8 @@ class AsyncSingleModelCallback(BaseCallback):
             # 考虑到 PPO 训练时参数变化，直接 save 可能会有极小概率导致保存的模型参数不一致，
             # 但通常是可以接受的，且比阻塞好得多。
             self.save_thread = threading.Thread(
-                target=self._save_model_thread, args=(self.model, self.save_path)
+                target=self._save_model_thread,
+                args=(self.model, self.save_path, self.training_env),
             )
             self.save_thread.start()
 

@@ -1,9 +1,24 @@
 import numpy as np
 
-EXPECTED_ROWS = 6
-EXPECTED_COLS = 9
-EXPECTED_PLANTS = 10
 SUN_NORM = 200.0
+
+
+class _DiscreteActionSpace:
+    def __init__(self, n):
+        self.n = int(n)
+
+
+class DDQNSpaceSpec:
+    """
+    Env-like shape adapter for constructing DDQN networks without opening PVZ.
+    """
+
+    def __init__(self, env_spec, scenario_spec=None):
+        self.rows = env_spec.rows
+        self.cols = env_spec.cols
+        self.num_cards = env_spec.plant_types
+        self.action_space = _DiscreteActionSpace(env_spec.action_space_size)
+        self.plant_deck = list(scenario_spec.cards) if scenario_spec is not None else []
 
 
 def _extract_action_mask(obs, env):
@@ -75,13 +90,13 @@ class DDQNEnvAdapter:
     Wrap PVZEnv to provide DDQN-compatible observations and action masks.
 
     Observation vector:
-    - plant grid (6x9)
-    - zombie HP grid (6x9)
+    - plant grid (rows x cols)
+    - zombie HP grid (rows x cols)
     - plant availability (10)
     - sun (1)
     """
 
-    def __init__(self, env):
+    def __init__(self, env, env_spec=None, scenario_spec=None):
         self.env = env
         self.action_space = env.action_space
         self.rows = env.rows
@@ -89,15 +104,28 @@ class DDQNEnvAdapter:
         self.num_cards = env.num_cards
         self.plant_deck = list(getattr(env, "card_plant_ids", []))
         self._last_action_mask = None
-        if self.rows != EXPECTED_ROWS or self.cols != EXPECTED_COLS:
+        expected_rows = env_spec.rows if env_spec is not None else self.rows
+        expected_cols = env_spec.cols if env_spec is not None else self.cols
+        expected_plants = env_spec.plant_types if env_spec is not None else self.num_cards
+        if self.rows != expected_rows or self.cols != expected_cols:
             raise ValueError(
-                f"DDQN expects grid {EXPECTED_ROWS}x{EXPECTED_COLS}, "
+                f"DDQN expects grid {expected_rows}x{expected_cols}, "
                 f"but env has {self.rows}x{self.cols}."
             )
-        if self.num_cards != EXPECTED_PLANTS:
+        if self.num_cards != expected_plants:
             raise ValueError(
-                f"DDQN expects {EXPECTED_PLANTS} plant types, "
+                f"DDQN expects {expected_plants} plant types, "
                 f"but env has {self.num_cards}."
+            )
+        if env_spec is not None and self.action_space.n != env_spec.action_space_size:
+            raise ValueError(
+                f"DDQN expects {env_spec.action_space_size} actions, "
+                f"but env has {self.action_space.n}."
+            )
+        if scenario_spec is not None and tuple(self.plant_deck) != scenario_spec.cards:
+            raise ValueError(
+                f"DDQN expects cards {scenario_spec.cards}, "
+                f"but env has {tuple(self.plant_deck)}."
             )
 
     @property

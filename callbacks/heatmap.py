@@ -25,6 +25,8 @@ class HeatmapCallback(BaseCallback):
                 # 获取最新的观测 (VecEnv -> Dict -> grid)
                 obs = self.locals.get("new_obs")
                 if obs and "grid" in obs:
+                    obs_grid = obs["grid"][0]
+                    grid_rows, grid_cols = obs_grid.shape[:2]
                     # 触发一次预测以更新注意力权重 (predict 会自动切换到 eval 模式)
                     # 这对于我们在 attention_extractor.py 中添加的钩子是必须的
                     self.model.predict(obs, deterministic=True)
@@ -34,22 +36,20 @@ class HeatmapCallback(BaseCallback):
                     if hasattr(
                         self.model.policy.features_extractor, "last_attn_weights"
                     ):
-                        # last_attn_weights 是 (B, 45)
+                        # last_attn_weights 是 (B, rows * cols)
                         weights_tensor = (
                             self.model.policy.features_extractor.last_attn_weights
                         )
                         if weights_tensor is not None:
                             # 动态计算形状
                             flat_size = weights_tensor.shape[1]
-                            cols = 9
-                            rows = flat_size // cols
                             try:
                                 attn_weights = (
                                     weights_tensor[0]
                                     .detach()
                                     .cpu()
                                     .numpy()
-                                    .reshape(rows, cols)
+                                    .reshape(grid_rows, grid_cols)
                                 )
                             except ValueError:
                                 pass
@@ -57,14 +57,14 @@ class HeatmapCallback(BaseCallback):
                             # Attention weights extracted (silent mode)
 
                     # 取第一个环境的观测
-                    grid = obs["grid"][0]  # (rows, 9, 11)
+                    grid = obs_grid
                     self.generate_html(grid, attn_weights)
             except Exception as e:
                 pass  # 忽略错误，不影响训练
         return True
 
     def generate_html(self, grid, attn_map=None):
-        # grid shape: (rows, 9, 11)
+        # grid shape: (rows, cols, channels)
         rows, cols, channels = grid.shape
 
         # 通道 8: DPS (Blue)
@@ -134,6 +134,7 @@ class HeatmapCallback(BaseCallback):
         </html>
         """
 
+        os.makedirs(os.path.dirname(self.save_path) or ".", exist_ok=True)
         with open(self.save_path, "w", encoding="utf-8") as f:
             f.write(html_content)
 

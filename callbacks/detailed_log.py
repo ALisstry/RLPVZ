@@ -66,32 +66,26 @@ class DetailedLogCallback(BaseCallback):
     def _log_attention_coherence(self, action):
         from utils.logger import log_attention_debug
 
+        obs = self.locals.get("new_obs")
+        grid_shape = self._infer_grid_shape(obs)
+        if grid_shape is None:
+            return
+        rows, cols = grid_shape
+
         # 获取注意力权重
         attn_weights = None
         if hasattr(self.model.policy.features_extractor, "last_attn_weights"):
             weights_tensor = self.model.policy.features_extractor.last_attn_weights
             if weights_tensor is not None:
-                # 动态计算形状
-                flat_size = weights_tensor.shape[1]
-                cols = 9
-                rows = flat_size // cols
                 try:
                     attn_weights = (
                         weights_tensor[0].detach().cpu().numpy().reshape(rows, cols)
                     )
                 except ValueError:
-                    # 如果形状不匹配 (例如包含 CLS token)，尝试忽略额外的 token
-                    if flat_size > rows * cols:
-                        # 假设最后的是 grid tokens
-                        grid_tokens = flat_size - (rows * cols)
-                        # 这里简化处理，如果无法 reshape 就不记录
-                        pass
+                    pass
 
         if attn_weights is None:
             return
-
-        # 获取观测
-        obs = self.locals.get("new_obs")
 
         # 计算统计量
         max_attn_pos = np.unravel_index(attn_weights.argmax(), attn_weights.shape)
@@ -99,7 +93,7 @@ class DetailedLogCallback(BaseCallback):
         # 获取最大威胁位置 (从 grid 的 threat channel)
         threat_pos = None
         if obs and "grid" in obs:
-            grid = obs["grid"][0]  # (rows, 9, channels)
+            grid = obs["grid"][0]  # (rows, cols, channels)
             if grid.shape[2] > 9:
                 threat_map = grid[:, :, 9]
                 threat_pos = np.unravel_index(threat_map.argmax(), threat_map.shape)
@@ -141,11 +135,12 @@ class DetailedLogCallback(BaseCallback):
         if hasattr(self.model.policy.features_extractor, "last_attn_weights"):
             weights_tensor = self.model.policy.features_extractor.last_attn_weights
             if weights_tensor is not None:
-                # 动态计算形状
-                flat_size = weights_tensor.shape[1]
-                cols = 9
-                rows = flat_size // cols
+                obs = self.locals.get("new_obs")
+                grid_shape = self._infer_grid_shape(obs)
                 try:
+                    if grid_shape is None:
+                        return
+                    rows, cols = grid_shape
                     attn_weights = (
                         weights_tensor[0].detach().cpu().numpy().reshape(rows, cols)
                     )
@@ -160,6 +155,16 @@ class DetailedLogCallback(BaseCallback):
             reason="Zombie reached house" if info["episode"]["r"] < 0 else "Unknown",
             attn_distribution=attn_distribution,
         )
+
+    def _infer_grid_shape(self, obs):
+        if not obs or "grid" not in obs:
+            return None
+        grid = obs["grid"]
+        if len(grid.shape) == 4:
+            return int(grid.shape[1]), int(grid.shape[2])
+        if len(grid.shape) == 3:
+            return int(grid.shape[0]), int(grid.shape[1])
+        return None
 
 
 # =============================================================================

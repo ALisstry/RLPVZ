@@ -14,8 +14,6 @@ from stable_baselines3.common.vec_env import (
 )
 
 from envs import PVZEnv
-import train_utils
-import models.ddqn.train_entry as ddqn_factory
 
 
 def mask_fn(env):
@@ -94,9 +92,55 @@ class DiversifiedPVZEnv(PVZEnv):
                 self._cached_game_state = self.pvz.get_game_state()
 
 
-def make_single_env(args, instance):
+def _validate_env_spec(env, env_spec, scenario_spec):
+    if env_spec is None:
+        return
+    actual_cards = tuple(getattr(env, "card_plant_ids", ()))
+    if env.rows != env_spec.rows or env.cols != env_spec.cols:
+        raise ValueError(
+            f"EnvSpec grid mismatch: expected {env_spec.rows}x{env_spec.cols}, "
+            f"got {env.rows}x{env.cols}."
+        )
+    if env.num_cards != env_spec.plant_types:
+        raise ValueError(
+            f"EnvSpec plant type mismatch: expected {env_spec.plant_types}, "
+            f"got {env.num_cards}."
+        )
+    if env.action_space.n != env_spec.action_space_size:
+        raise ValueError(
+            f"EnvSpec action size mismatch: expected {env_spec.action_space_size}, "
+            f"got {env.action_space.n}."
+        )
+    grid_shape = env.observation_space["grid"].shape
+    expected_grid_shape = (env_spec.rows, env_spec.cols, env_spec.grid_channels)
+    if grid_shape != expected_grid_shape:
+        raise ValueError(
+            f"EnvSpec grid observation mismatch: expected {expected_grid_shape}, "
+            f"got {grid_shape}."
+        )
+    global_shape = env.observation_space["global_features"].shape
+    if global_shape != (env_spec.global_feature_dim,):
+        raise ValueError(
+            "EnvSpec global feature mismatch: "
+            f"expected {(env_spec.global_feature_dim,)}, got {global_shape}."
+        )
+    card_shape = env.observation_space["card_attributes"].shape
+    if card_shape != env_spec.card_attribute_shape:
+        raise ValueError(
+            "EnvSpec card attribute mismatch: "
+            f"expected {env_spec.card_attribute_shape}, got {card_shape}."
+        )
+    if scenario_spec is not None and actual_cards != scenario_spec.cards:
+        raise ValueError(
+            f"ScenarioSpec cards mismatch: expected {scenario_spec.cards}, "
+            f"got {actual_cards}."
+        )
+
+
+def make_single_env(args, instance, env_spec=None, scenario_spec=None):
     if args.no_diversify:
         env = PVZEnv(
+            config_path=args.training_config,
             hook_port=instance["port"],
             target_pid=instance["pid"],
             game_speed=args.speed,
@@ -106,6 +150,7 @@ def make_single_env(args, instance):
         )
     else:
         env = DiversifiedPVZEnv(
+            config_path=args.training_config,
             hook_port=instance["port"],
             target_pid=instance["pid"],
             game_speed=args.speed,
@@ -114,27 +159,23 @@ def make_single_env(args, instance):
             verbose=args.env_console_log_level,
             log_verbose=args.file_log_level,
         )
+    _validate_env_spec(env, env_spec, scenario_spec)
     env = ActionMasker(env, mask_fn)
     return env
 
 
-def _make_env_factory(args, instance):
+def _make_env_factory(args, instance, env_spec=None, scenario_spec=None):
     def _factory():
-        return make_single_env(args, instance)
+        return make_single_env(args, instance, env_spec, scenario_spec)
 
     return _factory
 
 
-def get_env(args):
-    if args.algo == "ddqn":
-        env = ddqn_factory._build_ddqn_env(args)
-        return env
-
-    load_path = train_utils.resolve_load_path(args)
-    instances = getattr(args, "game_instances", None) or train_utils.resolve_game_instances(
-        args
-    )
-    factories = [_make_env_factory(args, instance) for instance in instances]
+def get_env(args, instances, env_spec=None, scenario_spec=None, load_path=None):
+    factories = [
+        _make_env_factory(args, instance, env_spec, scenario_spec)
+        for instance in instances
+    ]
     if len(factories) == 1:
         env = DummyVecEnv(factories)
     else:
