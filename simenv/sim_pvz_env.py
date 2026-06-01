@@ -110,33 +110,36 @@ class SimPVZEnv:
         pass
 
     def _build_state(self):
-        """Build state vector matching the original pvz_rl PVZEnv_V2 format.
+        """Raw state vector matching original PVZEnv_V2._get_obs().
 
-        Layout (95 dims):
-          [0:45]   plant_grid   — categorical: 0=empty, 1=Sunflower, 2=Peashooter, 3=Wallnut, 4=Potatomine
-          [45:90]  zombie_grid  — raw zombie HP sum per cell (unscaled, handled by ZombieNet)
-          [90]     sun          — raw sun value (will be /200 by _transform_observation)
-          [91:95]  action_avail — binary: 1 = plant available (cooldown ok + sun enough)
+        Returns int64[95]:
+          [0:45]   plant_grid   — categorical 0=empty, 1=SF, 2=Pea, 3=Wall, 4=Mine
+          [45:90]  zombie_grid  — raw zombie HP sum per cell
+          [90]     sun          — raw sun (capped at MAX_SUN)
+          [91:95]  action_avail — 0/1 mask per card
         """
-        plant_grid = np.zeros(self.grid_size, dtype=np.float32)
-        zombie_grid = np.zeros(self.grid_size, dtype=np.float32)
+        plant_grid = np.zeros(self.grid_size, dtype=int)
+        zombie_grid = np.zeros(self.grid_size, dtype=int)
         for plant in self._scene.plants:
             idx = plant.lane * self.cols + plant.pos
-            plant_grid[idx] = float(self._plant_no[plant.__class__.__name__] + 1)
+            plant_grid[idx] = self._plant_no[plant.__class__.__name__] + 1
         for zombie in self._scene.zombies:
             idx = zombie.lane * self.cols + zombie.pos
-            zombie_grid[idx] += float(zombie.hp)
+            zombie_grid[idx] += int(zombie.hp)
 
-        plant_avail = np.array([
-            (self._scene.plant_cooldowns[name] <= 0
-             and self._scene.sun >= self.plant_deck[name].COST)
+        action_avail = np.array([
+            self._scene.plant_cooldowns[name] <= 0
             for name in self._plant_names
-        ], dtype=np.float32)
-
-        sun_val = np.array([float(min(self._scene.sun, MAX_SUN)) / SUN_NORM], dtype=np.float32)
+        ], dtype=bool)
+        action_avail *= np.array([
+            self._scene.sun >= self.plant_deck[name].COST
+            for name in self._plant_names
+        ], dtype=bool)
 
         return np.concatenate(
-            [plant_grid, zombie_grid, sun_val, plant_avail], axis=0)
+            [plant_grid, zombie_grid,
+             np.array([min(self._scene.sun, MAX_SUN)], dtype=int),
+             action_avail.astype(int)]).astype(np.int64)
 
     def _take_action(self, action):
         if action > 0:

@@ -15,7 +15,7 @@ models/*.pkl
 crash.txt
 heatmap.html
 models_output/*
-
+saved/
 
 # OS
 .DS_Store
