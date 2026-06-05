@@ -111,11 +111,13 @@ class SimQNetwork(nn.Module):
             state_t = torch.cat([plant_grid, zombie_grid, state_t[2 * self._grid_size:]])
         return self.network(state_t)
 
+    @torch.no_grad()
     def decide_action(self, state, mask, epsilon):
         if np.random.random() < epsilon:
             return np.random.choice(self.actions[mask])
         return self.get_greedy_action(state, mask)
 
+    @torch.no_grad()
     def get_greedy_action(self, state, mask):
         qvals = self.get_qvals(state)
         mask_t = torch.as_tensor(mask, dtype=torch.bool, device=qvals.device)
@@ -198,11 +200,13 @@ class SimDeepMLPNetwork(nn.Module):
             out = out.squeeze(0)
         return out
 
+    @torch.no_grad()
     def decide_action(self, state, mask, epsilon):
         if np.random.random() < epsilon:
             return np.random.choice(self.actions[mask])
         return self.get_greedy_action(state, mask)
 
+    @torch.no_grad()
     def get_greedy_action(self, state, mask):
         qvals = self.get_qvals(state)
         mask_t = torch.as_tensor(mask, dtype=torch.bool, device=qvals.device)
@@ -343,11 +347,13 @@ class SimCNNQNetwork(nn.Module):
         features = self._cnn_features(state_t)
         return self.fc(features)
 
+    @torch.no_grad()
     def decide_action(self, state, mask, epsilon):
         if np.random.random() < epsilon:
             return np.random.choice(self.actions[mask])
         return self.get_greedy_action(state, mask)
 
+    @torch.no_grad()
     def get_greedy_action(self, state, mask):
         qvals = self.get_qvals(state)
         mask_t = torch.as_tensor(mask, dtype=torch.bool, device=qvals.device)

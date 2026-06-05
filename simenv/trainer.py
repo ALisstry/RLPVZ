@@ -212,7 +212,8 @@ def _evaluate(env, network, n_episodes=100):
         steps = 0
         while not done:
             mask = env.mask_available_actions()
-            qvals = network.get_qvals(state)
+            with torch.no_grad():
+                qvals = network.get_qvals(state)
             mask_t = torch.as_tensor(mask, dtype=torch.bool, device=qvals.device)
             qvals = qvals.clone()
             qvals[~mask_t] = qvals.min()
@@ -256,7 +257,8 @@ def _visualize_episode(env, network):
     total_reward = 0.0
     while not done:
         mask = env.mask_available_actions()
-        qvals = network.get_qvals(state)
+        with torch.no_grad():
+            qvals = network.get_qvals(state)
         mask_t = torch.as_tensor(mask, dtype=torch.bool, device=qvals.device)
         qvals = qvals.clone()
         qvals[~mask_t] = qvals.min()
