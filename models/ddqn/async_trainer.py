@@ -2,11 +2,13 @@ import queue
 
 from .ddqn import experienceReplayBuffer
 from .learner import DDQNLearner
-from .metric_emitter import DDQNMetricEmitter
-from .reporting import DDQNConsoleReporter
-from .training_stats import DDQNTrainingStats
+from .monitoring import (
+    DDQNConsoleReporter,
+    DDQNMetricEmitter,
+    DDQNTrainingStats,
+    DDQNWorkerStatus,
+)
 from .worker_pool import DDQNWorkerPool
-from .worker_status import DDQNWorkerStatus
 
 
 class AsyncDDQNTrainer:

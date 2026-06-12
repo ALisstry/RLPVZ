@@ -1,11 +1,9 @@
 from .checkpoint import CheckpointManager
-from .context_builder import build_train_context
-from .device import setup_device
+from .context import build_train_context
 from .logging import setup_logging
 from .paths import build_run_paths
-from .reporting import print_metadata
-from .run_metadata import write_run_metadata
 from .game_instances import prepare_game_instances
+from utils.train_utils import print_metadata, setup_device, write_run_metadata
 
 
 class TrainRunner:
@@ -16,8 +14,10 @@ class TrainRunner:
     def run(self) -> None:
         run_paths = build_run_paths(self.args)
         setup_logging(self.args, run_paths)
+
         checkpoint = CheckpointManager(self.args, run_paths)
         checkpoint.prepare_resume()
+
         print_metadata(self.args, self.algorithm, run_paths)
         device = setup_device()
 

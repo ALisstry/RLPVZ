@@ -28,6 +28,7 @@ class CheckpointPaths:
     tagged_path: str | None
 
 
+# 构建输出目录和文件地址、格式
 def build_run_paths(args) -> RunPaths:
     algo = args.algo
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -75,7 +76,9 @@ def build_checkpoint_paths(
     tagged_path = None
     if tag:
         output_dir = (
-            run_paths.output_dir if run_paths is not None else get_model_output_dir(algo)
+            run_paths.output_dir
+            if run_paths is not None
+            else get_model_output_dir(algo)
         )
         tagged_path = os.path.join(output_dir, f"{tag}{registration.model_extension}")
     return CheckpointPaths(

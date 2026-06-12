@@ -1,5 +1,8 @@
 import argparse
 
+# 实现
+# add_args: 注册该算法支持的 CLI 参数。
+
 
 def add_args(group):
     group.add_argument(

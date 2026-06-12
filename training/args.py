@@ -1,31 +1,32 @@
 import argparse
-import os
-
-import yaml
 
 from training.curriculum import CURRICULUM_CHOICES
 from training.execution import EXECUTION_CHOICES
 from training.registry import add_algorithm_args, available_algorithms
-
-DEFAULT_TRAINING_CONFIG = "training_config.yaml"
+import training.constants as const
+from utils.train_utils import load_training_config
 
 
 def get_args(argv=None):
     """
     统一封装训练参数：通用 + 算法插件。
     """
+    # 读取 config file 中的配置
     config_path, cli_algo = _preparse_config(argv)
-    config = _load_yaml_config(config_path)
+    config = load_training_config(config_path)
     config_defaults = _build_config_defaults(config, config_path, cli_algo)
 
+    # 设置默认值
     parser = argparse.ArgumentParser(description="PVZ 训练")
     _add_common_args(parser)
     add_algorithm_args(parser)
     parser.set_defaults(**config_defaults)
 
+    # 应用传入值
     return parser.parse_args(argv)
 
 
+# 读取 training_config 和 algo
 def _preparse_config(argv=None):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--training_config", type=str, default=argparse.SUPPRESS)
@@ -36,16 +37,9 @@ def _preparse_config(argv=None):
         default=argparse.SUPPRESS,
     )
     parsed, _ = parser.parse_known_args(argv)
-    return getattr(parsed, "training_config", DEFAULT_TRAINING_CONFIG), getattr(
+    return getattr(parsed, "training_config", const.CONFIG_PATH), getattr(
         parsed, "algo", None
     )
-
-
-def _load_yaml_config(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"训练配置文件不存在: {path}")
-    with open(path, "r", encoding="utf-8") as file:
-        return yaml.safe_load(file) or {}
 
 
 def _build_config_defaults(config, config_path, cli_algo=None):

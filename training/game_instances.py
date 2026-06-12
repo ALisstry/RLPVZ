@@ -7,7 +7,6 @@ import psutil
 from hook_client import inject_dll
 from hook_client.injector import find_pvz_process, list_pvz_processes
 
-
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLKIT_PATH = os.path.join(
     PROJECT_ROOT, "PvZ_Toolkit_v1.22.0", "PvZ_Toolkit_v1.22.0_ZH.exe"
@@ -17,22 +16,22 @@ V5_MANAGER_PATH = os.path.join(PROJECT_ROOT, "v5ProcessManager", "V5.exe")
 
 def prepare_game_instances(args):
     if not args.no_auto_start:
-        ensure_prelaunch_tools()
-        wait_for_pvz_processes(args.num_envs, poll_interval=max(0.5, args.wait_time))
-        print_detected_pvz_processes()
+        _ensure_prelaunch_tools()
+        _wait_for_pvz_processes(args.num_envs, poll_interval=max(0.5, args.wait_time))
+        _print_detected_pvz_processes()
 
     try:
-        instances = resolve_game_instances(args)
+        instances = _resolve_game_instances(args)
     except (RuntimeError, ValueError) as exc:
         print(f"[错误] {exc}")
         return None
 
     if args.no_auto_start:
-        print_detected_pvz_processes()
+        _print_detected_pvz_processes()
 
     if len(instances) == 1 and not args.no_auto_start:
         instance = instances[0]
-        if not launch_game_and_inject(
+        if not _launch_game_and_inject(
             game_path=args.game_path,
             wait_time=args.wait_time,
             port=instance["port"],
@@ -41,7 +40,9 @@ def prepare_game_instances(args):
             print("无法启动游戏或注入 DLL，训练终止")
             print("  请使用 --no_auto_start 选项手动启动游戏和注入")
             return None
-        instance["pid"] = find_pvz_process() if instance["pid"] is None else instance["pid"]
+        instance["pid"] = (
+            find_pvz_process() if instance["pid"] is None else instance["pid"]
+        )
         return instances
 
     if not args.no_auto_start:
@@ -56,7 +57,8 @@ def prepare_game_instances(args):
         print(
             "[Hook] 多实例注入完成: "
             + ", ".join(
-                f"pid={instance['pid']} port={instance['port']}" for instance in instances
+                f"pid={instance['pid']} port={instance['port']}"
+                for instance in instances
             )
         )
     else:
@@ -64,7 +66,7 @@ def prepare_game_instances(args):
     return instances
 
 
-def launch_game_and_inject(
+def _launch_game_and_inject(
     game_path: str = None,
     wait_time: float = 3.0,
     port: int = 12345,
@@ -73,7 +75,9 @@ def launch_game_and_inject(
     pid = pid or find_pvz_process()
     if not pid:
         if not game_path:
-            print("[错误] 未配置游戏路径，请在 training_config.yaml 的 training.args.game_path 中设置")
+            print(
+                "[错误] 未配置游戏路径，请在 training_config.yaml 的 training.args.game_path 中设置"
+            )
             return False
         if not os.path.exists(game_path):
             print(f"[错误] 游戏文件不存在: {game_path}")
@@ -104,13 +108,13 @@ def launch_game_and_inject(
     return False
 
 
-def ensure_prelaunch_tools():
+def _ensure_prelaunch_tools():
     toolkit_ok = _launch_background_exe(TOOLKIT_PATH, "PvZ Toolkit")
     manager_ok = _launch_background_exe(V5_MANAGER_PATH, "V5 Process Manager")
     return toolkit_ok and manager_ok
 
 
-def wait_for_pvz_processes(expected_count: int, poll_interval: float = 1.0):
+def _wait_for_pvz_processes(expected_count: int, poll_interval: float = 1.0):
     expected_count = max(1, int(expected_count))
     while True:
         pids = list_pvz_processes()
@@ -124,13 +128,13 @@ def wait_for_pvz_processes(expected_count: int, poll_interval: float = 1.0):
         time.sleep(poll_interval)
 
 
-def print_detected_pvz_processes():
+def _print_detected_pvz_processes():
     pids = list_pvz_processes()
     print(f"[PVZ] 当前发现的所有进程 PID: {pids}")
     return pids
 
 
-def resolve_game_instances(args):
+def _resolve_game_instances(args):
     requested = max(1, int(getattr(args, "num_envs", 1)))
     explicit_pids = _parse_int_list(getattr(args, "pids", ""))
     explicit_ports = _parse_int_list(getattr(args, "ports", ""))
