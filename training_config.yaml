@@ -12,6 +12,8 @@ game:
   rows: 6                       # 行数 (泳池6行)
   cols: 9                       # 列数
   initial_sun: 50               # 初始阳光
+  win_condition: "survival_sublevels"
+  target_sublevels: 2
 
 # =============================================================================
 # 卡槽配置 (10张卡)
@@ -192,11 +194,105 @@ rewards:
     delta_scale: 0.6
 
 # =============================================================================
+# 课程学习配置
+# =============================================================================
+# training.args.curriculum 默认使用 "stage_gate"。
+# 直接运行: .\.venv\Scripts\python.exe train.py
+curriculum:
+  stage_gate:
+    stages:
+      # 达到 min_episodes && mean_reward_threshold && mean_success_rate_threshold 后升阶。
+      - stage_name: "combat_day_rows_pea"
+        game_mode_id: 1
+        level: null
+        rows: 5
+        cols: 9
+        enabled_rows: [0, 1, 2]
+        enabled_plants: [0]
+        initial_sun: 300
+        win_condition: "survival_sublevels"
+        target_sublevels: 1
+        # 当前阶段至少完成的 episode 数。
+        min_episodes: 8
+        # 最近 metric_window 个 episode reward 的平均值阈值。
+        mean_reward_threshold: 500.0
+        # 最近 metric_window 个 episode 胜率平均值；小数比例，取值范围 0.0-1.0。
+        mean_success_rate_threshold: 0.7
+      
+      - stage_name: "economy_day_rows_sun_pea"
+        game_mode_id: 11
+        level: null
+        rows: 5
+        cols: 9
+        enabled_rows: [0, 1, 2]
+        enabled_plants: [1, 0]
+        initial_sun: 50
+        win_condition: "survival_sublevels"
+        target_sublevels: 1
+        # 当前阶段至少完成的 episode 数。
+        min_episodes: 12
+        # 最近 metric_window 个 episode reward 的平均值阈值。
+        mean_reward_threshold: 350.0
+        # 最近 metric_window 个 episode 胜率平均值；小数比例，取值范围 0.0-1.0。
+        mean_success_rate_threshold: 0.75
+
+      - stage_name: "defense_day_rows_sun_pea_wall"
+        game_mode_id: 11
+        level: null
+        rows: 5
+        cols: 9
+        enabled_rows: [0, 1, 2]
+        enabled_plants: [1, 0, 3]
+        initial_sun: 200
+        win_condition: "survival_sublevels"
+        target_sublevels: 1
+        # 当前阶段至少完成的 episode 数。
+        min_episodes: 10
+        # 最近 metric_window 个 episode reward 的平均值阈值。
+        mean_reward_threshold: 500.0
+        # 最近 metric_window 个 episode 胜率平均值；小数比例，取值范围 0.0-1.0。
+        mean_success_rate_threshold: 0.75
+
+      - stage_name: "defense_day_full_rows"
+        game_mode_id: 11
+        level: null
+        rows: 5
+        cols: 9
+        enabled_rows: [0, 1, 2, 3, 4]
+        enabled_plants: [1, 0, 3]
+        initial_sun: 200
+        win_condition: "survival_sublevels"
+        target_sublevels: 1
+        # 当前阶段至少完成的 episode 数。
+        min_episodes: 12
+        # 最近 metric_window 个 episode reward 的平均值阈值。
+        mean_reward_threshold: 700.0
+        # 最近 metric_window 个 episode 胜率平均值；小数比例，取值范围 0.0-1.0。
+        mean_success_rate_threshold: 0.65
+
+      - stage_name: "full_pool"
+        game_mode_id: 13
+        level: null
+        rows: 6
+        cols: 9
+        enabled_rows: [0, 1, 2, 3, 4, 5]
+        enabled_plants: [1, 0, 7, 16, 3, 17, 2, 43, 18, 39]
+        initial_sun: 50
+        win_condition: "survival_sublevels"
+        target_sublevels: 2
+
+# =============================================================================
+# 统计窗口配置
+# =============================================================================
+# Stage-gate curriculum 与 DDQN 控制台共用的 recent metrics 窗口。
+metric_window: 10
+
+# =============================================================================
 # 训练配置
 # =============================================================================
 training:
   args:
-    algo: "ddqn"                # 默认算法: ppo 或 ddqn
+    algo: "ppo"                # 默认算法: ppo 或 ddqn
     port: 12345
     num_envs: 1
     base_port: 12345
@@ -211,7 +307,7 @@ training:
     env_console_log_level: 0
     file_log_level: 1
     execution: "auto"
-    curriculum: "none"
+    curriculum: "stage_gate"
   
   ppo:
     timesteps: 500000

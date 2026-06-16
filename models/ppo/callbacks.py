@@ -7,12 +7,13 @@ from callbacks import (
     DynamicEntropyCallback,
     HeatmapCallback,
     MemoryResetCallback,
+    PPOCurriculumCallback,
     PPOMetricsCallback,
     SimpleMonitorCallback,
 )
 
 
-def build_callbacks(args, run_paths, checkpoint=None, metrics=None):
+def build_callbacks(args, run_paths, checkpoint=None, metrics=None, context=None):
     os.makedirs(run_paths.output_dir, exist_ok=True)
 
     callbacks = [
@@ -31,8 +32,11 @@ def build_callbacks(args, run_paths, checkpoint=None, metrics=None):
             verbose=1,
         ),
         DetailedLogCallback(log_freq=500),
-        PPOMetricsCallback(metrics=metrics),
     ]
+    if metrics is not None:
+        callbacks.append(PPOMetricsCallback(metrics=metrics))
+    if context is not None and getattr(args, "curriculum", "none") != "none":
+        callbacks.append(PPOCurriculumCallback(context=context))
 
     callbacks.append(
         DynamicEntropyCallback(

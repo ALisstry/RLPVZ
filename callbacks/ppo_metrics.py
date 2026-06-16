@@ -42,38 +42,39 @@ class PPOMetricsCallback(BaseCallback):
             self.mean_rewards.append(mean_reward)
             self.mean_iterations.append(mean_iteration)
 
-            self.metrics.emit_many(
-                [
-                    MetricEvent(
-                        source="ppo",
-                        name="episode_reward",
-                        value=reward,
-                        step=self.num_timesteps,
-                        episode=self.episode_count,
-                    ),
-                    MetricEvent(
-                        source="ppo",
-                        name="episode_iterations",
-                        value=iterations,
-                        step=self.num_timesteps,
-                        episode=self.episode_count,
-                    ),
-                    MetricEvent(
-                        source="ppo",
-                        name="mean_reward",
-                        value=mean_reward,
-                        step=self.num_timesteps,
-                        episode=self.episode_count,
-                    ),
-                    MetricEvent(
-                        source="ppo",
-                        name="mean_iterations",
-                        value=mean_iteration,
-                        step=self.num_timesteps,
-                        episode=self.episode_count,
-                    ),
-                ]
-            )
+            if self.metrics is not None:
+                self.metrics.emit_many(
+                    [
+                        MetricEvent(
+                            source="ppo",
+                            name="episode_reward",
+                            value=reward,
+                            step=self.num_timesteps,
+                            episode=self.episode_count,
+                        ),
+                        MetricEvent(
+                            source="ppo",
+                            name="episode_iterations",
+                            value=iterations,
+                            step=self.num_timesteps,
+                            episode=self.episode_count,
+                        ),
+                        MetricEvent(
+                            source="ppo",
+                            name="mean_reward",
+                            value=mean_reward,
+                            step=self.num_timesteps,
+                            episode=self.episode_count,
+                        ),
+                        MetricEvent(
+                            source="ppo",
+                            name="mean_iterations",
+                            value=mean_iteration,
+                            step=self.num_timesteps,
+                            episode=self.episode_count,
+                        ),
+                    ]
+                )
             self._emit_snapshot()
 
         return True

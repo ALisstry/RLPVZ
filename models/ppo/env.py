@@ -147,6 +147,8 @@ def make_single_env(args, instance, env_spec=None, scenario_spec=None):
             frame_skip=args.frameskip,
             verbose=args.env_console_log_level,
             log_verbose=args.file_log_level,
+            env_spec=env_spec,
+            scenario_spec=scenario_spec,
         )
     else:
         env = DiversifiedPVZEnv(
@@ -158,6 +160,8 @@ def make_single_env(args, instance, env_spec=None, scenario_spec=None):
             diversify_prob=args.diversify,
             verbose=args.env_console_log_level,
             log_verbose=args.file_log_level,
+            env_spec=env_spec,
+            scenario_spec=scenario_spec,
         )
     _validate_env_spec(env, env_spec, scenario_spec)
     env = ActionMasker(env, mask_fn)

@@ -78,16 +78,17 @@ def write_run_metadata(context, algorithm, status: str = "initialized", error=No
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "error": repr(error) if error is not None else None,
         "training_config_snapshot": config_snapshot_path,
-        "args": _to_jsonable(vars(context.args)),
-        "algorithm": _to_jsonable(algorithm.spec),
-        "execution": _to_jsonable(context.execution),
-        "env_spec": _to_jsonable(context.env_spec),
-        "scenario_spec": _to_jsonable(context.scenario_spec),
+        "args": to_jsonable(vars(context.args)),
+        "algorithm": to_jsonable(algorithm.spec),
+        "execution": to_jsonable(context.execution),
+        "env_spec": to_jsonable(context.env_spec),
+        "scenario_spec": to_jsonable(context.scenario_spec),
         "curriculum": {
             "name": getattr(context.curriculum, "name", None),
-            "scenario": _to_jsonable(context.curriculum.current_scenario()),
+            "stage_name": get_current_stage_name(context.curriculum),
+            "scenario": to_jsonable(context.curriculum.current_scenario()),
         },
-        "run_paths": _to_jsonable(context.run_paths),
+        "run_paths": to_jsonable(context.run_paths),
     }
     with open(metadata_path, "w", encoding="utf-8") as file:
         json.dump(metadata, file, ensure_ascii=False, indent=2)
@@ -104,13 +105,24 @@ def _write_config_snapshot(context) -> str | None:
     return snapshot_path
 
 
-def _to_jsonable(value):
+def to_jsonable(value):
     if is_dataclass(value):
-        return _to_jsonable(asdict(value))
+        return to_jsonable(asdict(value))
     if isinstance(value, dict):
-        return {str(key): _to_jsonable(item) for key, item in value.items()}
+        return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_to_jsonable(item) for item in value]
+        return [to_jsonable(item) for item in value]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def to_json_string(value) -> str:
+    return json.dumps(to_jsonable(value), ensure_ascii=False, sort_keys=True)
+
+
+def get_current_stage_name(curriculum) -> str:
+    getter = getattr(curriculum, "current_stage_name", None)
+    if getter is None:
+        return ""
+    return str(getter())

@@ -26,6 +26,8 @@ def _build_ddqn_env(args, instance=None, env_spec=None, scenario_spec=None):
         frame_skip=args.frameskip,
         verbose=args.env_console_log_level,
         log_verbose=args.file_log_level,
+        env_spec=env_spec,
+        scenario_spec=scenario_spec,
     )
     return DDQNEnvAdapter(env, env_spec=env_spec, scenario_spec=scenario_spec)
 
@@ -61,6 +63,8 @@ class DDQNAlgorithm:
             frame_skip=self.args.frameskip,
             verbose=self.args.env_console_log_level,
             log_verbose=self.args.file_log_level,
+            env_spec=env_spec,
+            scenario_spec=scenario_spec,
         )
         return DDQNEnvAdapter(env, env_spec=env_spec, scenario_spec=scenario_spec)
 
@@ -100,6 +104,7 @@ class DDQNAlgorithm:
             network,
             metrics=context.metrics,
             checkpoint=context.checkpoint,
+            context=context,
             env_spec=context.env_spec,
             scenario_spec=context.scenario_spec,
         )

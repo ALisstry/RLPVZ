@@ -317,6 +317,7 @@ class PVZInterface:
         scene = self.reader.get_scene()
         refresh_cd = self.reader.read_int(board + Offset.REFRESH_COUNTDOWN)
         huge_wave_cd = self.reader.read_int(board + Offset.HUGE_WAVE_COUNTDOWN)
+        level_end_cd = self.reader.read_int(board + Offset.LEVEL_END_COUNTDOWN)
         
         # Read zombies
         zombies = self._read_zombies(board)
@@ -350,6 +351,7 @@ class PVZInterface:
             scene=scene,
             refresh_countdown=refresh_cd,
             huge_wave_countdown=huge_wave_cd,
+            level_end_countdown=level_end_cd,
             click_pao_countdown=click_pao_cd,
             zombies=zombies,
             plants=plants,
