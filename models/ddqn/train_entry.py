@@ -1,7 +1,14 @@
 import os
+import torch
 
 from training.execution import require_execution
 from training.registry import AlgorithmSpec
+
+# 实现
+# create_algorithm(): 返回当前算法的 Algorithm 实例。供 training.registry 动态创建。
+# spec: 声明算法名称、on/off-policy、是否支持课程学习、多进程等。
+# describe_config: 返回启动时需要打印的关键算法配置。
+# train: 接收 TrainContext，构建环境规格、模型、trainer，并启动训练。
 
 
 def _build_ddqn_env(args, instance=None, env_spec=None, scenario_spec=None):
@@ -23,67 +30,6 @@ def _build_ddqn_env(args, instance=None, env_spec=None, scenario_spec=None):
     return DDQNEnvAdapter(env, env_spec=env_spec, scenario_spec=scenario_spec)
 
 
-def train_ddqn(
-    args,
-    metrics=None,
-    checkpoint=None,
-    artifacts=None,
-    env_spec=None,
-    scenario_spec=None,
-    instances=None,
-    execution=None,
-):
-    import torch
-    from .async_trainer import AsyncDDQNTrainer
-    from .adapter import DDQNSpaceSpec
-    from .ddqn import QNetwork
-
-    if instances is None:
-        raise ValueError("DDQN 训练需要 TrainContext 提供 game_instances")
-    if execution is not None:
-        require_execution(execution, "async_worker_pool", "DDQN")
-    if env_spec is not None:
-        env = DDQNSpaceSpec(env_spec, scenario_spec=scenario_spec)
-    else:
-        env = _build_ddqn_env(
-            args,
-            instance=instances[0],
-            env_spec=env_spec,
-            scenario_spec=scenario_spec,
-        )
-    if artifacts is not None and hasattr(env, "close"):
-        artifacts.env = env
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    network = QNetwork(env, learning_rate=args.ddqn_lr, device=device)
-    if artifacts is not None:
-        artifacts.network = network
-
-    load_path = checkpoint.resolve_load_path() if checkpoint is not None else args.ddqn_load_path
-    if load_path and os.path.exists(load_path):
-        print(f"加载 DDQN 模型: {load_path}")
-        state_dict = torch.load(load_path, map_location=device)
-        network.load_state_dict(state_dict)
-
-    trainer = AsyncDDQNTrainer(
-        args,
-        instances,
-        network,
-        metrics=metrics,
-        checkpoint=checkpoint,
-        env_spec=env_spec,
-        scenario_spec=scenario_spec,
-    )
-
-    trainer.train(
-        max_episodes=args.ddqn_episodes,
-        network_update_frequency=args.ddqn_update_freq,
-        network_sync_frequency=args.ddqn_sync_freq,
-        evaluate_frequency=args.ddqn_eval_freq,
-        evaluate_n_iter=args.ddqn_eval_iters,
-    )
-
-
 class DDQNAlgorithm:
     spec = AlgorithmSpec(
         name="ddqn",
@@ -103,19 +49,69 @@ class DDQNAlgorithm:
             f"Update: {self.args.ddqn_update_freq} | Sync: {self.args.ddqn_sync_freq}",
         ]
 
+    def _build_env(self, instance, env_spec=None, scenario_spec=None):
+        from envs import PVZEnv
+        from .adapter import DDQNEnvAdapter
+
+        env = PVZEnv(
+            config_path=self.args.training_config,
+            hook_port=instance["port"],
+            target_pid=instance["pid"],
+            game_speed=self.args.speed,
+            frame_skip=self.args.frameskip,
+            verbose=self.args.env_console_log_level,
+            log_verbose=self.args.file_log_level,
+        )
+        return DDQNEnvAdapter(env, env_spec=env_spec, scenario_spec=scenario_spec)
+
     def train(self, context) -> None:
-        train_ddqn(
+        from .adapter import DDQNSpaceSpec
+        from .async_trainer import AsyncDDQNTrainer
+        from .ddqn import QNetwork
+
+        require_execution(context.execution, "async_worker_pool", "DDQN")
+        if context.game_instances is None:
+            raise ValueError("DDQN 训练需要 TrainContext 提供 game_instances")
+
+        if context.env_spec is not None:
+            env = DDQNSpaceSpec(context.env_spec, scenario_spec=context.scenario_spec)
+        else:
+            env = self._build_env(
+                instance=context.game_instances[0],
+                env_spec=context.env_spec,
+                scenario_spec=context.scenario_spec,
+            )
+        if hasattr(env, "close"):
+            context.artifacts.env = env
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        network = QNetwork(env, learning_rate=context.args.ddqn_lr, device=device)
+        context.artifacts.network = network
+
+        load_path = context.checkpoint.resolve_load_path()
+        if load_path and os.path.exists(load_path):
+            print(f"加载 DDQN 模型: {load_path}")
+            state_dict = torch.load(load_path, map_location=device)
+            network.load_state_dict(state_dict)
+
+        trainer = AsyncDDQNTrainer(
             context.args,
+            context.game_instances,
+            network,
             metrics=context.metrics,
             checkpoint=context.checkpoint,
-            artifacts=context.artifacts,
             env_spec=context.env_spec,
             scenario_spec=context.scenario_spec,
-            instances=context.game_instances,
-            execution=context.execution,
+        )
+
+        trainer.train(
+            max_episodes=context.args.ddqn_episodes,
+            network_update_frequency=context.args.ddqn_update_freq,
+            network_sync_frequency=context.args.ddqn_sync_freq,
+            evaluate_frequency=context.args.ddqn_eval_freq,
+            evaluate_n_iter=context.args.ddqn_eval_iters,
         )
 
 
 def create_algorithm(args):
     return DDQNAlgorithm(args)
-

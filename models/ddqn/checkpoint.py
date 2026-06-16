@@ -4,6 +4,11 @@ import torch
 
 from training.paths import build_checkpoint_paths, get_cached_model_path
 
+# 实现
+# resolve_load_path: 返回要加载的 checkpoint 路径；没有则返回 None。
+# prepare_resume: 训练开始前加载 checkpoint，可指定路径。
+# save_checkpoint: 保存 payload 中的算法状态，并返回主缓存模型路径或 None。
+
 
 def prepare_resume(args, run_paths=None):
     if args.ddqn_load_path:

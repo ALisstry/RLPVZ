@@ -52,9 +52,10 @@ def __getattr__(name):
 
         return TrainContext
     if name == "TrainingArtifacts":
-        from .artifacts import TrainingArtifacts
+        from .context import TrainingArtifacts
 
         return TrainingArtifacts
+
     if name == "TrainRunner":
         from .runner import TrainRunner
 

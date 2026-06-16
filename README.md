@@ -213,7 +213,7 @@ AGENTS.md              二次开发协作规则
 simenv/                仿真环境（纯 Python PVZ 模拟）
   simenv/pvz_sim/      仿真游戏引擎（实体、场景、网格、移动）
 tools/                 独立辅助工具
-utils/                 日志、绘图、坐标、伤害等通用工具
+utils/                 日志、绘图、坐标、伤害和训练辅助工具
 train.py               统一训练入口
 train_sim_ddqn.py      仿真环境 DDQN 训练脚本
 training/              训练生命周期、日志、checkpoint、metrics 和运行准备
@@ -230,6 +230,7 @@ AGENTS.md              Agents 开发协作规则
 - `EnvSpec` / `ScenarioSpec`：集中表达模型输入输出规格和训练场景。
 - `CheckpointManager`：统一恢复、缓存模型、周期 checkpoint 和异常保存入口。
 - `MetricsPipeline`：统一写入 `jsonl`、`csv`、snapshot 和训练曲线。
+- `utils/train_utils.py`：集中放置训练配置读取、Torch 运行时设置、GPU 显存打印和 run metadata 写入。
 
 PPO 和 DDQN 保留各自算法本质差异，不强行共用同一个训练循环。
 
@@ -244,7 +245,7 @@ DDQN 当前使用异步 actor-learner 结构：
 - async trainer 位于主进程，负责 replay buffer、worker queue、update/sync 调度、checkpoint 触发。
 - worker 将 transition 发送给 learner。
 - learner 定期更新网络，并向 worker 广播最新权重。
-- episode 统计、worker 状态、metrics 输出和控制台报告分别拆分到独立模块。
+- episode 统计、worker 状态、metrics 输出和控制台报告统一收敛在 `models/ddqn/monitoring.py`。
 
 这种结构用于避免单个游戏进程 reset 或 UI 准备耗时阻塞其他进程。
 

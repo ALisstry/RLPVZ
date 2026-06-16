@@ -1,10 +1,11 @@
 from training.args import get_args
-from training.bootstrap import configure_training_process
-
+import training.constants as const
+from training.runner import TrainRunner
+from training.registry import create_algorithm
+from utils.train_utils import set_torch_num_threads
 
 def main():
-    configure_training_process()
-    from training import TrainRunner, create_algorithm
+    set_torch_num_threads(const.TORCH_THREADS_NUM)
 
     args = get_args()
     algorithm = create_algorithm(args.algo, args)
@@ -14,4 +15,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -1,11 +1,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-import yaml
-
-######## CONST
-CONFIG__PATH = "training_config.yaml"
-########
+from utils.train_utils import load_training_config
 
 
 @dataclass(frozen=True)
@@ -33,7 +29,7 @@ class ScenarioSpec:
 
 
 def build_specs(args: Any) -> tuple[EnvSpec, ScenarioSpec]:
-    config = _load_training_config(getattr(args, "training_config", None))
+    config = load_training_config(getattr(args, "training_config", None))
     game_cfg = config.get("game", {})
     cards_cfg = config.get("cards", {})
     action_cfg = config.get("action_space", {})
@@ -80,12 +76,6 @@ def build_specs(args: Any) -> tuple[EnvSpec, ScenarioSpec]:
         enabled_plants=cards,
     )
     return env_spec, scenario_spec
-
-
-def _load_training_config(path: str | None = None) -> dict:
-    path = path or CONFIG__PATH
-    with open(path, "r", encoding="utf-8") as file:
-        return yaml.safe_load(file) or {}
 
 
 def _parse_shape(raw_shape, default: tuple[int, ...]) -> tuple[int, ...]:
