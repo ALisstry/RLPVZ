@@ -73,3 +73,22 @@ def add_args(group):
         default=argparse.SUPPRESS,
         help="DDQN model load path",
     )
+    group.add_argument(
+        "--ddqn_hidden_sizes",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="DDQN hidden layer sizes, comma-separated (e.g. 2048,2048)",
+    )
+    group.add_argument(
+        "--ddqn_paper_observation",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Use paper-format 596-dim one-hot observation",
+    )
+    group.add_argument(
+        "--no_ddqn_paper_observation",
+        dest="ddqn_paper_observation",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Use legacy flat observation (default)",
+    )

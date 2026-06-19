@@ -8,6 +8,23 @@ from training.logging import setup_worker_logging
 from training.worker_pool import AsyncWorkerPool
 
 
+def _parse_worker_hidden_sizes(args) -> list[int] | None:
+    """Parse hidden sizes from args for worker-side QNetwork construction.
+
+    Handles YAML list or CLI comma-separated string.
+    """
+    raw = getattr(args, "ddqn_hidden_sizes", None)
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        result = [int(x) for x in raw]
+        return result if result else None
+    if isinstance(raw, str) and raw.strip():
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        return [int(p) for p in parts] if parts else None
+    return None
+
+
 class DDQNWorkerPool(AsyncWorkerPool):
     def __init__(
         self,
@@ -57,6 +74,7 @@ def _build_worker_env(args, instance, env_spec=None, scenario_spec=None):
     from envs import PVZEnv
     from .adapter import DDQNEnvAdapter
 
+    use_paper = bool(getattr(args, "ddqn_paper_observation", False))
     env = PVZEnv(
         config_path=args.training_config,
         hook_port=instance["port"],
@@ -66,7 +84,10 @@ def _build_worker_env(args, instance, env_spec=None, scenario_spec=None):
         verbose=args.env_console_log_level,
         log_verbose=args.file_log_level,
     )
-    return DDQNEnvAdapter(env, env_spec=env_spec, scenario_spec=scenario_spec)
+    return DDQNEnvAdapter(
+        env, env_spec=env_spec, scenario_spec=scenario_spec,
+        use_paper_observation=use_paper,
+    )
 
 
 def _drain_latest_weights(weights_queue):
@@ -103,7 +124,20 @@ def ddqn_worker_main(
     try:
         setup_worker_logging(args)
         env = _build_worker_env(args, instance, env_spec, scenario_spec)
-        network = QNetwork(env, learning_rate=args.ddqn_lr, device="cpu")
+        use_paper = bool(getattr(args, "ddqn_paper_observation", False))
+        hidden_sizes = _parse_worker_hidden_sizes(args)
+        n_inputs_override = None
+        if use_paper:
+            from .adapter import paper_state_dim
+            n_inputs_override = paper_state_dim(env.rows, env.cols, env.num_cards)
+
+        network = QNetwork(
+            env,
+            learning_rate=args.ddqn_lr,
+            device="cpu",
+            hidden_sizes=hidden_sizes,
+            n_inputs_override=n_inputs_override,
+        )
         network.load_state_dict(initial_state_dict)
         network.eval()
 

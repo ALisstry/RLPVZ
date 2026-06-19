@@ -1,0 +1,227 @@
+# PVZ AI Baseline Training Configuration
+# Survival Day — matches paper spec (596-dim obs, 2048→2048 DDQN, sparse reward)
+#
+# Usage:
+#   .\.venv\Scripts\python.exe train.py --training_config training_config_baseline.yaml
+
+# =============================================================================
+# Game Settings — Survival: Day
+# =============================================================================
+game:
+  mode: "survival_day"           # 生存模式(白天)
+  game_mode_id: 1                # GAMEMODE_SURVIVAL_NORMAL_STAGE_1 = 生存白天
+  background_type: 0             # BACKGROUND_DAY
+  map: "day"                     # 草地 (5 rows, no pool)
+  rows: 5                        # 5 rows
+  cols: 9                        # 9 columns
+  initial_sun: 50
+
+# =============================================================================
+# Card Loadout — exactly matching paper Table 4
+# =============================================================================
+cards:
+  slot_count: 10
+
+  plants:
+    # Slot 0: Sunflower (economy)
+    - slot: 0
+      id: 1
+      name: "Sunflower"
+      cost: 50
+
+    # Slot 1: Peashooter (basic offense)
+    - slot: 1
+      id: 0
+      name: "Peashooter"
+      cost: 100
+
+    # Slot 2: Potato Mine (trap)
+    - slot: 2
+      id: 4
+      name: "Potato Mine"
+      cost: 25
+
+    # Slot 3: Wall-nut (defense)
+    - slot: 3
+      id: 3
+      name: "Wall-nut"
+      cost: 50
+
+    # Slot 4: Repeater (double damage)
+    - slot: 4
+      id: 7
+      name: "Repeater"
+      cost: 200
+
+    # Slot 5: Squash (instant kill)
+    - slot: 5
+      id: 17
+      name: "Squash"
+      cost: 50
+
+    # Slot 6: Cherry Bomb (AOE instant)
+    - slot: 6
+      id: 2
+      name: "Cherry Bomb"
+      cost: 150
+
+    # Slot 7: Snow Pea (slow)
+    - slot: 7
+      id: 5
+      name: "Snow Pea"
+      cost: 175
+
+    # Slot 8: Melon-pult (AOE damage)
+    - slot: 8
+      id: 39
+      name: "Melon-pult"
+      cost: 300
+
+    # Slot 9: Spikeweed (ground trap)
+    - slot: 9
+      id: 21
+      name: "Spikeweed"
+      cost: 100
+
+# =============================================================================
+# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451
+# =============================================================================
+action_space:
+  type: "discrete"
+  size: 451
+
+  structure:
+    plant_actions: 450          # 10 cards × 45 cells
+    shovel_actions: 0           # disabled
+    wait_action: 1
+
+# =============================================================================
+# Observation Space — matches paper's 596-dim flat vector spec
+# Grid channels: 13-channel grid (used by PPO / PVZEnv internally)
+# DDQN adapter will extract paper-format: plant one-hot + HP + zombie HP + sun + cooldown
+# =============================================================================
+observation_space:
+  grid:
+    shape: [5, 9, 13]           # 5 rows × 9 cols × 13 channels
+    channels:
+      - "plant_type"
+      - "plant_hp"
+      - "plant_function"
+      - "zombie_density"
+      - "zombie_hp"
+      - "zombie_threat"
+      - "zombie_urgency"
+      - "zombie_status"
+      - "bullet_density"
+      - "bullet_threat"
+      - "dps_heatmap"
+      - "threat_heatmap"
+      - "kill_heatmap"
+
+  global:
+    features:
+      - "sun"
+      - "sun_producing"
+      - "wave"
+      - "total_waves"
+      - "wave_countdown"
+      - "game_clock"
+      - "zombie_count"
+      - "zombie_total_hp"
+      - "plant_count"
+      - "lawnmower_status"
+      - "cards_cd_ratio"
+      - "cards_affordable"
+      - "row_threat"
+      - "row_defense"
+      - "huge_wave_countdown"
+      - "zombie_refresh_hp"
+      - "ice_trails"
+      - "next_wave_preview"
+    total_dim: 65               # 5 + 1+1+1+1+1+1+1+1 + 5 + 10 + 10 + 5 + 5 + 1 + 1 + 5 + 10
+
+  card_attributes:
+    shape: [10, 7]
+
+# =============================================================================
+# Reward — sparse zombie-kill-only rewards matching paper Table 5
+# All reward values are scaled down compared to original config for stability
+# =============================================================================
+rewards:
+  # Zombie kill rewards (sparse signal — matches paper Table 5)
+  zombie_kill:
+    normal: 0.2                 # Basic Zombie
+    conehead: 0.3               # Conehead Zombie
+    buckethead: 0.6             # Buckethead Zombie
+    pole_vaulter: 0.5           # Pole Vaulter Zombie
+    football: 0.8               # Football Zombie
+    gargantuar: 2.0             # Gargantuar
+    default: 0.3                # Other zombie types
+
+  # All auxiliary rewards set to 0 for clean sparse baseline
+  sun_collect: 0.0
+  wave_complete: 0.0
+  game_win: 0.0
+  streak_bonus: 0.0
+  survival_per_step: 0.0
+  plant_sunflower: 0.0
+  plant_attacker: 0.0
+  plant_wall: 0.0
+  plant_lost: 0.0
+  sunflower_lost: 0.0
+  lawnmower_triggered: 0.0
+  game_lose: 0.0
+  invalid_action: 0.0
+
+  # Potential-based shaping: disabled for clean baseline
+  potential:
+    delta_scale: 0.0
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  args:
+    algo: "ddqn"
+    port: 12345
+    num_envs: 1
+    base_port: 12345
+    ports: ""
+    pids: ""
+    no_auto_start: false
+    game_path: "gameobj/PlantsVsZombies.exe"
+    wait_time: 3.0
+    speed: 10.0
+    frameskip: 24               # matches paper: ~4-5 decisions per in-game second
+    no_auto_resume: false
+    env_console_log_level: 0
+    file_log_level: 1
+    execution: "async_worker_pool"
+    curriculum: "none"
+
+    # Paper observation format (one-hot + HP)
+    ddqn_paper_observation: true
+
+  ddqn:
+    ddqn_episodes: 10000        # paper: 10,000 episodes
+    ddqn_gamma: 0.99            # paper spec
+    ddqn_batch_size: 32         # paper spec
+    ddqn_buffer_size: 50000     # paper spec
+    ddqn_burn_in: 10000         # paper spec
+    ddqn_lr: 0.001              # paper spec
+    ddqn_update_freq: 32
+    ddqn_sync_freq: 2000        # paper spec: target sync every 2000 steps
+    ddqn_eval_freq: 100         # evaluate every 100 episodes
+    ddqn_eval_iters: 5
+    ddqn_checkpoint_freq: 500
+    ddqn_plot_freq: 50
+    ddqn_plot_path: null
+    ddqn_save_path: null
+    ddqn_load_path: null
+
+    # Paper network architecture: 2 hidden layers of 2048 each
+    ddqn_hidden_sizes: [2048, 2048]
+
+  env:
+    max_steps: 10000
+    normalize_obs: true
