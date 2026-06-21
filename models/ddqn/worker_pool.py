@@ -216,7 +216,7 @@ def ddqn_worker_main(
 
             local_episode += 1
             # Periodic memory diagnostic in worker
-            if local_episode % 200 == 0:
+            if local_episode % 50 == 0 or local_episode == 1:
                 try:
                     import os as _os, gc as _gc, tracemalloc as _tm
                     import psutil as _psutil
