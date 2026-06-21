@@ -1,5 +1,7 @@
 import queue
 
+import numpy as np
+
 from .ddqn import experienceReplayBuffer
 from .learner import DDQNLearner
 from .monitoring import (
@@ -46,6 +48,10 @@ class AsyncDDQNTrainer:
         self.checkpoint = checkpoint
         self.env_spec = env_spec
         self.scenario_spec = scenario_spec
+        self._snapshot_freq = max(
+            1, int(getattr(args, "ddqn_plot_freq", 20))
+        )  # rate-limit snapshot emission
+        self._last_snapshot_ep = 0
 
     def train(
         self,
@@ -98,7 +104,19 @@ class AsyncDDQNTrainer:
                     raise RuntimeError("所有 DDQN worker 都已退出，训练终止")
                 continue
 
-            self.buffer.append(*transition)
+            # Store contiguous copies to reduce memory fragmentation
+            (t_state, t_action, t_reward, t_done,
+             t_next_state, t_mask, t_next_mask) = transition
+            self.buffer.append(
+                np.ascontiguousarray(t_state),
+                t_action,
+                t_reward,
+                t_done,
+                np.ascontiguousarray(t_next_state),
+                np.ascontiguousarray(t_mask),
+                np.ascontiguousarray(t_next_mask),
+            )
+            del t_state, t_next_state, t_mask, t_next_mask, transition
             self.transition_count += 1
 
             if self.buffer.burn_in_capacity() < 1:
@@ -168,10 +186,26 @@ class AsyncDDQNTrainer:
                 self.solved = True
                 return
 
+            if self.stats.episode_count % 500 == 0:
+                import gc
+
+                gc.collect()
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
             if self.stats.should_evaluate(evaluate_frequency):
                 eval_stats = self.stats.record_eval(evaluate_n_iter)
                 self.metric_emitter.emit_eval(eval_stats, self.transition_count)
                 self.reporter.print_eval(eval_stats, progress_line)
 
     def _emit_training_metrics(self, force=False):
+        ep = self.stats.episode_count
+        if not force and ep - self._last_snapshot_ep < self._snapshot_freq:
+            return
+        self._last_snapshot_ep = ep
         self.metric_emitter.emit_snapshot(self.stats.to_snapshot(force=force))

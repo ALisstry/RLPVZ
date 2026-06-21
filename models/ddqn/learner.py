@@ -6,6 +6,8 @@ import torch.nn as nn
 
 from .ddqn import copy_state_dict_to_cpu
 
+_mseloss = nn.MSELoss()
+
 
 class DDQNLearner:
     def __init__(self, network, batch_size: int, gamma: float):
@@ -55,7 +57,7 @@ class DDQNLearner:
             qvals_next = torch.gather(target_qvals, 1, next_actions_t)
         qvals_next[dones_t] = 0
         expected_qvals = self.gamma * qvals_next + rewards_t
-        return nn.MSELoss()(qvals, expected_qvals)
+        return _mseloss(qvals, expected_qvals)
 
     def update(self, replay_buffer):
         self.network.optimizer.zero_grad(set_to_none=True)

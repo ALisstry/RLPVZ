@@ -44,7 +44,7 @@ class DDQNWorkerPool(AsyncWorkerPool):
 
         super().__init__(instances)
         self.transition_queue = self.make_queue(maxsize=max(2048, self.batch_size * 64))
-        self.stats_queue = self.make_queue()
+        self.stats_queue = self.make_queue(maxsize=1024)
         self.weight_queues = self.make_per_worker_queues(maxsize=1)
 
     def start(self):
@@ -156,6 +156,7 @@ def ddqn_worker_main(
             latest_state_dict = _drain_latest_weights(weights_queue)
             if latest_state_dict is not None:
                 network.load_state_dict(latest_state_dict)
+                del latest_state_dict
 
             mask = np.array(env.mask_available_actions(), dtype=bool)
             epsilon = threshold.epsilon(local_episode)
@@ -199,6 +200,7 @@ def ddqn_worker_main(
                     latest_state_dict = _drain_latest_weights(weights_queue)
                     if latest_state_dict is not None:
                         network.load_state_dict(latest_state_dict)
+                        del latest_state_dict
 
             state = next_state.copy()
             episode_reward += reward
