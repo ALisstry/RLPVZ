@@ -145,6 +145,11 @@ def ddqn_worker_main(
         network.load_state_dict(initial_state_dict)
         network.eval()
 
+        # inference_mode: stronger than no_grad, saves memory in forward pass
+        import torch as _torch
+        _inference_ctx = _torch.inference_mode()
+        _inference_ctx.__enter__()
+
         # Match epsilon decay span to the configured episode count
         epsilon_seq_length = max(1, int(getattr(args, "ddqn_episodes", 10000)))
         threshold = Threshold(
@@ -215,6 +220,10 @@ def ddqn_worker_main(
                 continue
 
             local_episode += 1
+            # Periodic memory cleanup in worker
+            if local_episode % 100 == 0:
+                import gc as _gc
+                _gc.collect()
             # Periodic memory diagnostic in worker
             if local_episode % 50 == 0 or local_episode == 1:
                 try:
