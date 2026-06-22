@@ -219,20 +219,23 @@ def ddqn_worker_main(
             if local_episode % 50 == 0 or local_episode == 1:
                 try:
                     import os as _os, gc as _gc, tracemalloc as _tm
-                    import psutil as _psutil
+                    import psutil as _psutil, logging as _logging
                     _gc.collect()
                     proc = _psutil.Process(_os.getpid())
                     mem_mb = proc.memory_info().rss / 1024 / 1024
+                    _logger = _logging.getLogger("ddqn_worker")
                     if _tm.is_tracing():
                         snap = _tm.take_snapshot()
-                        top = snap.statistics("lineno")[:8]
-                        lines = [f"{s.count:5d} × {s.size/1024:.0f}KB = {s}" for s in top]
-                        print(f"\n[MEM] worker{worker_id} PID={_os.getpid()} "
-                              f"RSS={mem_mb:.0f}MB ep={local_episode}\n  "
-                              + "\n  ".join(lines), flush=True)
+                        top = snap.statistics("lineno")[:6]
+                        lines = [f"  {s.count:5d} x {s.size/1024:.0f}KB {s}" for s in top]
+                        _logger.warning(
+                            f"worker{worker_id} PID={_os.getpid()} "
+                            f"RSS={mem_mb:.0f}MB ep={local_episode}\n"
+                            + "\n".join(lines))
                     else:
-                        print(f"\n[MEM] worker{worker_id} PID={_os.getpid()} "
-                              f"RSS={mem_mb:.0f}MB ep={local_episode}", flush=True)
+                        _logger.warning(
+                            f"worker{worker_id} PID={_os.getpid()} "
+                            f"RSS={mem_mb:.0f}MB ep={local_episode}")
                 except Exception:
                     pass
 
