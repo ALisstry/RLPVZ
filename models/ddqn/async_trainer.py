@@ -3,6 +3,8 @@ import os
 
 import numpy as np
 
+from utils.train_utils import get_current_stage_name, load_training_config
+
 from .ddqn import experienceReplayBuffer
 from .learner import DDQNLearner
 from .monitoring import (
@@ -22,6 +24,7 @@ class AsyncDDQNTrainer:
         network,
         metrics=None,
         checkpoint=None,
+        context=None,
         env_spec=None,
         scenario_spec=None,
     ):
@@ -38,7 +41,10 @@ class AsyncDDQNTrainer:
         )
         self.batch_size = args.ddqn_batch_size
         self.reward_threshold = 30000
-        self.stats = DDQNTrainingStats(window=100)
+        config = load_training_config(getattr(args, "training_config", None))
+        self.stats = DDQNTrainingStats(
+            window=max(1, int(config.get("metric_window", 100)))
+        )
 
         self.transition_count = 0
         self.solved = False
@@ -47,6 +53,9 @@ class AsyncDDQNTrainer:
         self.metric_emitter = DDQNMetricEmitter(metrics)
         self.reporter = DDQNConsoleReporter()
         self.checkpoint = checkpoint
+        if context is None and getattr(args, "curriculum", "none") != "none":
+            raise ValueError("DDQN curriculum training requires TrainContext")
+        self.context = context
         self.env_spec = env_spec
         self.scenario_spec = scenario_spec
         self._snapshot_freq = max(
@@ -161,11 +170,14 @@ class AsyncDDQNTrainer:
                 continue
 
             episode_stats = self.stats.record_episode(
-                message["reward"], message["iterations"]
+                message["reward"],
+                message["iterations"],
+                bool(message.get("win") is True),
             )
             self.metric_emitter.emit_episode(
                 message, episode_stats, self.transition_count
             )
+            self._update_curriculum(worker_pool, message, episode_stats)
 
             if (
                 self.checkpoint is not None
@@ -211,7 +223,12 @@ class AsyncDDQNTrainer:
             if self.stats.should_evaluate(evaluate_frequency):
                 eval_stats = self.stats.record_eval(evaluate_n_iter)
                 self.metric_emitter.emit_eval(eval_stats, self.transition_count)
-                self.reporter.print_eval(eval_stats, progress_line)
+                stage_name = (
+                    get_current_stage_name(self.context.curriculum)
+                    if self.context is not None
+                    else ""
+                )
+                self.reporter.print_eval(eval_stats, progress_line, stage_name)
 
     def _emit_training_metrics(self, force=False):
         ep = self.stats.episode_count
@@ -219,3 +236,19 @@ class AsyncDDQNTrainer:
             return
         self._last_snapshot_ep = ep
         self.metric_emitter.emit_snapshot(self.stats.to_snapshot(force=force))
+
+    def _update_curriculum(self, worker_pool, message, episode_stats):
+        if self.context is None:
+            return
+        changed, scenario = self.context.update_curriculum(
+            {
+                "episode_reward": float(message["reward"]),
+                "episode_success": bool(message.get("win") is True),
+                "episode_count": episode_stats.episode,
+                "step": self.transition_count,
+            }
+        )
+        if changed:
+            worker_pool.publish_scenario(scenario)
+        else:
+            worker_pool.acknowledge_episode(int(message["worker_id"]))

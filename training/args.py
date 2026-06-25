@@ -183,5 +183,5 @@ def _add_common_args(parser):
         type=str,
         default=argparse.SUPPRESS,
         choices=CURRICULUM_CHOICES,
-        help="课程学习策略；当前仅启用 none，保留公共策略入口",
+        help="课程学习策略: none=关闭, stage_gate=按阶段指标升阶",
     )

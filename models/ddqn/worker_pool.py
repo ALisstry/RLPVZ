@@ -8,6 +8,8 @@ from training.logging import setup_worker_logging
 from training.worker_pool import AsyncWorkerPool
 
 
+CURRICULUM_EPISODE_ACK = "__curriculum_episode_ack__"
+
 def _parse_worker_hidden_sizes(args) -> list[int] | None:
     """Parse hidden sizes from args for worker-side QNetwork construction.
 
@@ -46,6 +48,7 @@ class DDQNWorkerPool(AsyncWorkerPool):
         self.transition_queue = self.make_queue(maxsize=max(2048, self.batch_size * 64))
         self.stats_queue = self.make_queue(maxsize=1024)
         self.weight_queues = self.make_per_worker_queues(maxsize=1)
+        self.scenario_queues = self.make_per_worker_queues(maxsize=1)
 
     def start(self):
         self.start_workers(
@@ -58,6 +61,7 @@ class DDQNWorkerPool(AsyncWorkerPool):
                 self.transition_queue,
                 self.stats_queue,
                 self.weight_queues[worker_id],
+                self.scenario_queues[worker_id],
                 self.stop_event,
                 self.env_spec,
                 self.scenario_spec,
@@ -69,8 +73,23 @@ class DDQNWorkerPool(AsyncWorkerPool):
         for weights_queue in self.weight_queues:
             _put_latest_weights(weights_queue, state_dict)
 
+    def publish_scenario(self, scenario_spec):
+        for scenario_queue in self.scenario_queues:
+            while True:
+                try:
+                    scenario_queue.get_nowait()
+                except queue.Empty:
+                    break
+            scenario_queue.put(scenario_spec)
 
-def _build_worker_env(args, instance, env_spec=None, scenario_spec=None):
+    def acknowledge_episode(self, worker_id):
+        try:
+            self.scenario_queues[worker_id].put_nowait(CURRICULUM_EPISODE_ACK)
+        except queue.Full:
+            pass
+
+
+def _build_worker_env(args, instance, worker_id=None, env_spec=None, scenario_spec=None):
     from envs import PVZEnv
     from .adapter import DDQNEnvAdapter
 
@@ -83,6 +102,9 @@ def _build_worker_env(args, instance, env_spec=None, scenario_spec=None):
         frame_skip=args.frameskip,
         verbose=args.env_console_log_level,
         log_verbose=args.file_log_level,
+        env_spec=env_spec,
+        scenario_spec=scenario_spec,
+        worker_id=worker_id,
     )
     return DDQNEnvAdapter(
         env, env_spec=env_spec, scenario_spec=scenario_spec,
@@ -108,6 +130,33 @@ def _put_latest_weights(weights_queue, state_dict):
     weights_queue.put(copy_state_dict_to_cpu(state_dict))
 
 
+def _consume_scenario_queue(
+    env,
+    scenario_queue,
+    wait: bool = False,
+    timeout: float = 5.0,
+) -> None:
+    latest_scenario = None
+    if wait:
+        try:
+            item = scenario_queue.get(timeout=timeout)
+        except queue.Empty:
+            return
+        if item != CURRICULUM_EPISODE_ACK:
+            latest_scenario = item
+
+    while True:
+        try:
+            item = scenario_queue.get_nowait()
+        except queue.Empty:
+            break
+        if item != CURRICULUM_EPISODE_ACK:
+            latest_scenario = item
+
+    if latest_scenario is not None:
+        env.set_pending_scenario(latest_scenario)
+
+
 def ddqn_worker_main(
     worker_id,
     args,
@@ -116,6 +165,7 @@ def ddqn_worker_main(
     transition_queue,
     stats_queue,
     weights_queue,
+    scenario_queue,
     stop_event,
     env_spec,
     scenario_spec,
@@ -126,7 +176,7 @@ def ddqn_worker_main(
         # Enable tracemalloc for leak diagnosis
         import tracemalloc as _tm
         _tm.start()
-        env = _build_worker_env(args, instance, env_spec, scenario_spec)
+        env = _build_worker_env(args, instance, worker_id, env_spec, scenario_spec)
         use_paper = bool(getattr(args, "ddqn_paper_observation", False))
         hidden_sizes = _parse_worker_hidden_sizes(args)
         n_inputs_override = None
@@ -164,6 +214,7 @@ def ddqn_worker_main(
         local_episode = 0
 
         while not stop_event.is_set():
+            _consume_scenario_queue(env, scenario_queue)
             latest_state_dict = _drain_latest_weights(weights_queue)
             if latest_state_dict is not None:
                 network.load_state_dict(latest_state_dict)
@@ -254,12 +305,18 @@ def ddqn_worker_main(
                     "worker_id": worker_id,
                     "reward": episode_reward,
                     "iterations": env.steps,
+                    "win": bool(info.get("win") is True),
                     "epsilon": epsilon,
                     "port": instance["port"],
                     "pid": instance["pid"],
                 }
             )
             episode_reward = 0.0
+            if getattr(args, "curriculum", "none") != "none":
+                # episode 结束后等待主进程处理课程更新，确保新场景赶上下次 reset。
+                _consume_scenario_queue(env, scenario_queue, wait=True)
+            else:
+                _consume_scenario_queue(env, scenario_queue)
             state = _reset_env_with_retry(env, worker_id, instance, stats_queue, stop_event)
 
     except Exception as exc:

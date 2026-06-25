@@ -384,5 +384,8 @@ class DDQNEnvAdapter:
             return np.ones(self.action_space.n, dtype=bool)
         return self._last_action_mask.astype(bool)
 
+    def set_pending_scenario(self, scenario_spec):
+        return self.env.set_pending_scenario(scenario_spec)
+
     def close(self):
         return self.env.close()

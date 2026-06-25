@@ -15,16 +15,27 @@ class EpisodeStats:
     episode: int
     reward: float
     iterations: float
+    success: bool
     mean_reward: float
     mean_iterations: float
+    mean_success_rate: float
+    mean_window_size: int
+    mean_window_count: int
 
     @property
     def progress_line(self) -> str:
         return (
-            "Episode {:d} Mean Rewards {:.2f}\t\t Mean Iterations {:.2f}\t\t".format(
+            "Episode: {:d} Reward: {:.2f} Iterations: {:.2f} Win: {} | "
+            "Mean({:d}/{:d}) Reward: {:.2f} Iterations: {:.2f} WinRate: {:.2f}%".format(
                 self.episode,
+                self.reward,
+                self.iterations,
+                self.success,
+                self.mean_window_count,
+                self.mean_window_size,
                 self.mean_reward,
                 self.mean_iterations,
+                self.mean_success_rate * 100.0,
             )
         )
 
@@ -45,6 +56,7 @@ class DDQNTrainingStats:
         self.episode_count = 0
         self.training_rewards = []
         self.training_iterations = []
+        self.training_successes = []
         self.training_loss = []
         self.mean_training_rewards = []
         self.mean_training_iterations = []
@@ -53,12 +65,14 @@ class DDQNTrainingStats:
         self.eval_episodes = []
         self.sync_eps = []
 
-    def record_episode(self, reward, iterations) -> EpisodeStats:
+    def record_episode(self, reward, iterations, success) -> EpisodeStats:
         self.episode_count += 1
         reward = float(reward)
         iterations = float(iterations)
+        success = bool(success)
         self.training_rewards.append(reward)
         self.training_iterations.append(iterations)
+        self.training_successes.append(1.0 if success else 0.0)
 
         # Cap per-episode lists
         if len(self.training_rewards) > self._MAX_EPISODE_HISTORY:
@@ -67,8 +81,10 @@ class DDQNTrainingStats:
 
         recent_rewards = self.training_rewards[-self.window :]
         recent_iterations = self.training_iterations[-self.window :]
+        recent_successes = self.training_successes[-self.window :]
         mean_reward = sum(recent_rewards) / len(recent_rewards)
         mean_iterations = sum(recent_iterations) / len(recent_iterations)
+        mean_success_rate = sum(recent_successes) / len(recent_successes)
         self.mean_training_rewards.append(mean_reward)
         self.mean_training_iterations.append(mean_iterations)
 
@@ -81,8 +97,12 @@ class DDQNTrainingStats:
             episode=self.episode_count,
             reward=reward,
             iterations=iterations,
+            success=success,
             mean_reward=mean_reward,
             mean_iterations=mean_iterations,
+            mean_success_rate=mean_success_rate,
+            mean_window_size=self.window,
+            mean_window_count=len(recent_rewards),
         )
 
     def record_loss(self, loss_value):
@@ -162,6 +182,13 @@ class DDQNMetricEmitter:
             tags=worker_tags,
         )
         self.emit(
+            name="episode_success",
+            value=episode_stats.success,
+            step=transition_count,
+            episode=episode_stats.episode,
+            tags=worker_tags,
+        )
+        self.emit(
             name="mean_reward",
             value=episode_stats.mean_reward,
             step=transition_count,
@@ -170,6 +197,12 @@ class DDQNMetricEmitter:
         self.emit(
             name="mean_iterations",
             value=episode_stats.mean_iterations,
+            step=transition_count,
+            episode=episode_stats.episode,
+        )
+        self.emit(
+            name="mean_success_rate",
+            value=episode_stats.mean_success_rate,
             step=transition_count,
             episode=episode_stats.episode,
         )
@@ -209,16 +242,17 @@ class DDQNMetricEmitter:
 
 class DDQNConsoleReporter:
     def print_progress(self, episode_stats):
-        print("\r" + episode_stats.progress_line, end="", flush=True)
+        print(episode_stats.progress_line, flush=True)
 
-    def print_eval(self, eval_stats, progress_line):
+    def print_eval(self, eval_stats, progress_line, stage_name=""):
+        stage_text = f" | stage={stage_name}" if stage_name else ""
         print(
-            f"\n[Eval] Episode {eval_stats.episode} | "
+            f"[Eval] Episode {eval_stats.episode}{stage_text} | "
             f"avg_score={eval_stats.avg_score:.2f} | "
             f"avg_iter={eval_stats.avg_iterations:.2f}",
             flush=True,
         )
-        print("\r" + progress_line, end="", flush=True)
+        print(flush=True)
 
     def print_checkpoint(self, episode_count):
         print(

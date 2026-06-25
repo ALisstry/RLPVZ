@@ -57,6 +57,7 @@ class PPOAlgorithm:
             context.run_paths,
             checkpoint=context.checkpoint,
             metrics=context.metrics,
+            context=context,
         )
         run_ppo(model, context.args, callbacks)
 

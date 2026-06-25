@@ -8,6 +8,7 @@ Data sources:
 """
 
 from data.constants import *
+from data.game_modes import *
 from data.plants import *
 from data.zombies import *
 from data.projectiles import *

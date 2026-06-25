@@ -19,6 +19,8 @@ from pvz_interface import PVZInterface, InterfaceMode
 from data.plants import PlantType, PLANT_COST
 from data.zombies import ZombieType, ZOMBIE_BASE_SPEED
 from data.projectiles import ProjectileType, PROJECTILE_DAMAGE
+from data.game_modes import POOL_GAME_MODE_IDS, POOL_WATER_ROWS
+from training.specs import EnvSpec, ScenarioSpec, validate_scenario_spec
 import subprocess
 import psutil
 
@@ -72,6 +74,9 @@ _ZOMBIE_THREAT_PRIORITY = {
     ZombieType.DIGGER: 1.4,
 }
 
+_INACTIVE_ROW_CLEAR_INTERVAL_CS = 100
+_INACTIVE_ROW_CLEAR_COL = 0
+
 
 class PVZEnv(gym.Env):
     """
@@ -99,6 +104,9 @@ class PVZEnv(gym.Env):
         target_pid: Optional[int] = None,  # 绑定到指定 PVZ 进程
         verbose: int = 1,  # 日志级别: 0=静默, 1=关键信息, 2=详细调试
         log_verbose: int = 1,  # 文件日志级别: 0=静默, 1=关键信息, 2=详细调试
+        env_spec: Optional[EnvSpec] = None,
+        scenario_spec: Optional[ScenarioSpec] = None,
+        worker_id: Optional[int] = None,
     ):
         """
         初始化环境
@@ -111,6 +119,7 @@ class PVZEnv(gym.Env):
             game_speed: 游戏速度倍率 (1.0-10.0, 默认5.0)
             hook_port: Hook DLL TCP 端口（多实例并行时使用不同端口）
             verbose: 日志级别 (0=静默, 1=关键信息, 2=详细调试)
+            worker_id: 异步训练 worker 编号，用于区分多实例日志
         """
         super().__init__()
         
@@ -120,29 +129,68 @@ class PVZEnv(gym.Env):
         self.game_speed = max(0.1, min(100.0, game_speed))  # 支持最高 100x 速度
         self.hook_port = hook_port  # 保存端口
         self.target_pid = target_pid
+        self.worker_id = worker_id
         self.verbose = verbose  # 日志级别
         self.log_verbose = log_verbose
         
         # 加载配置
         self._load_config(config_path)
+        self.env_spec = env_spec
         
         # 游戏接口
         self.hook_client: Optional[HookClient] = None
         self.pvz: Optional[PVZInterface] = None
         
         # 游戏参数
-        self.rows = self.config['game']['rows']
-        self.cols = self.config['game']['cols']
-        self.num_cards = self.config['cards']['slot_count']
-        self.game_mode = self.config['game']['game_mode_id']  # 11
+        config_rows = int(self.config['game']['rows'])
+        config_cols = int(self.config['game']['cols'])
+        self.rows = int(env_spec.rows) if env_spec is not None else config_rows
+        self.cols = int(env_spec.cols) if env_spec is not None else config_cols
+        self.num_cards = (
+            int(env_spec.plant_types)
+            if env_spec is not None
+            else int(self.config['cards']['slot_count'])
+        )
+        # 当前实际运行的场景值；课程阶段会通过 ScenarioSpec 覆盖。
+        self.game_mode = int(self.config['game']['game_mode_id'])
         self.initial_sun = self.config['game'].get('initial_sun')
         if self.initial_sun is None:
             self.initial_sun = 50  # 默认50
+        else:
+            self.initial_sun = int(self.initial_sun)
         # 无尽模式不设置目标波数，从游戏状态获取
-        
+
         # 卡片信息
-        self.card_plant_ids = [p['id'] for p in self.config['cards']['plants']]
-        self.card_costs = [p['cost'] for p in self.config['cards']['plants']]
+        self.card_plant_ids = [int(p['id']) for p in self.config['cards']['plants']]
+        self.card_costs = [int(p['cost']) for p in self.config['cards']['plants']]
+        if len(self.card_plant_ids) != self.num_cards:
+            raise ValueError(
+                "cards.plants 数量必须与固定卡槽数量一致，避免动作索引语义变化"
+            )
+        self.current_scenario: ScenarioSpec | None = None
+        level = self.config['game'].get('level')
+        win_condition = str(self.config['game'].get('win_condition', 'level_end'))
+        target_sublevels = int(self.config['game'].get('target_sublevels', 1))
+        fallback_scenario = ScenarioSpec(
+            game_mode_id=self.game_mode,
+            level=None if level is None else int(level),
+            rows=config_rows,
+            cols=config_cols,
+            cards=tuple(self.card_plant_ids),
+            enabled_rows=tuple(range(config_rows)),
+            enabled_plants=tuple(self.card_plant_ids),
+            initial_sun=self.initial_sun,
+            win_condition=win_condition,
+            target_sublevels=target_sublevels,
+        )
+        self._pending_scenario: ScenarioSpec | None = scenario_spec or fallback_scenario
+        self.scenario_rows = config_rows
+        self.scenario_cols = config_cols
+        self.enabled_rows = set(range(config_rows))
+        self.enabled_plants = set(self.card_plant_ids)
+        self.win_condition = win_condition
+        self.target_sublevels = target_sublevels
+        self._apply_pending_scenario()
         
         # 动作空间: 种植动作 + 可选铲子动作 + 等待
         action_structure = self.config.get('action_space', {}).get('structure', {})
@@ -165,9 +213,14 @@ class PVZEnv(gym.Env):
         
         # 观测空间 (增强版)
         obs_config = self.config.get('observation_space', {})
-        grid_shape = obs_config.get('grid', {}).get('shape', [self.rows, self.cols, 13])
-        global_dim = obs_config.get('global', {}).get('total_dim', 71)  # 增加新特征
-        card_attr_shape = obs_config.get('card_attributes', {}).get('shape', [self.num_cards, 7])  # 增加子弹类型
+        if env_spec is not None:
+            grid_shape = [env_spec.rows, env_spec.cols, env_spec.grid_channels]
+            global_dim = env_spec.global_feature_dim
+            card_attr_shape = list(env_spec.card_attribute_shape)
+        else:
+            grid_shape = obs_config.get('grid', {}).get('shape', [self.rows, self.cols, 13])
+            global_dim = obs_config.get('global', {}).get('total_dim', 71)  # 增加新特征
+            card_attr_shape = obs_config.get('card_attributes', {}).get('shape', [self.num_cards, 7])  # 增加子弹类型
         
         self.observation_space = spaces.Dict({
             # 网格特征: 行×列×通道 (增强)
@@ -233,6 +286,7 @@ class PVZEnv(gym.Env):
         self.last_zombie_count = 0
         self.last_plant_count = 0
         self.last_wave = 0
+        self.last_total_waves = 0
         self.sunflower_count = 0
         self._cached_game_state = None  # 缓存游戏状态，减少内存读取
         self.last_potential = 0.0
@@ -263,6 +317,9 @@ class PVZEnv(gym.Env):
         self._episode_win = None  # 回合是否胜利
         self._victory_printed = False  # 是否已打印胜利信息
         self._no_zombie_steps = 0  # 连续无僵尸的步数
+        self.completed_sublevels = 0
+        self.sublevel_cleared_this_step = False
+        self._survival_sublevel_completion_latched = False
 
     def _should_console(self, level: int) -> bool:
         return self.verbose >= level
@@ -272,6 +329,8 @@ class PVZEnv(gym.Env):
 
     def _emit(self, message: str, console_level: int = 1, log_level: Optional[int] = None):
         effective_log_level = console_level if log_level is None else log_level
+        if self.worker_id is not None:
+            message = f"[Worker {self.worker_id}] {message}"
         if self._should_console(console_level):
             print(message)
             return
@@ -282,6 +341,114 @@ class PVZEnv(gym.Env):
         """加载配置文件"""
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
+
+    def set_pending_scenario(self, scenario_spec: ScenarioSpec) -> None:
+        # 只记录下一次 reset 要提交的场景，不改变 action/observation 空间。
+        validate_scenario_spec(
+            scenario_spec,
+            expected_cards=tuple(self.card_plant_ids),
+            max_rows=self.rows,
+            max_cols=self.cols,
+        )
+        self._pending_scenario = scenario_spec
+
+    def _apply_pending_scenario(self) -> bool:
+        # pending scenario 在 reset 开始时统一提交，避免中途改变当前 episode。
+        if self._pending_scenario is None:
+            return False
+        scenario_spec = self._pending_scenario
+        validate_scenario_spec(
+            scenario_spec,
+            expected_cards=tuple(self.card_plant_ids),
+            max_rows=self.rows,
+            max_cols=self.cols,
+        )
+        self.current_scenario = scenario_spec
+        # 当前场景值用于 reset 启动关卡和水路/陆地判断。
+        self.game_mode = int(scenario_spec.game_mode_id)
+        self.initial_sun = (
+            50
+            if scenario_spec.initial_sun is None
+            else int(scenario_spec.initial_sun)
+        )
+        self.scenario_rows = int(scenario_spec.rows)
+        self.scenario_cols = int(scenario_spec.cols)
+        self.enabled_rows = set(int(row) for row in scenario_spec.enabled_rows)
+        self.enabled_plants = set(int(plant) for plant in scenario_spec.enabled_plants)
+        self.win_condition = str(scenario_spec.win_condition)
+        self.target_sublevels = int(scenario_spec.target_sublevels)
+        self.completed_sublevels = 0
+        self.sublevel_cleared_this_step = False
+        self._survival_sublevel_completion_latched = False
+        self.last_total_waves = 0
+        self._last_inactive_row_clear_clock = None
+        self._pending_scenario = None
+        return True
+
+    def _is_curriculum_cell_enabled(self, row: int, col: int) -> bool:
+        return (
+            0 <= row < self.scenario_rows
+            and 0 <= col < self.scenario_cols
+            and row in self.enabled_rows
+        )
+
+    def _is_curriculum_row_enabled(self, row: int) -> bool:
+        return 0 <= row < self.scenario_rows and row in self.enabled_rows
+
+    def _is_curriculum_card_enabled(self, card_idx: int) -> bool:
+        if card_idx < 0 or card_idx >= len(self.card_plant_ids):
+            return False
+        return self.card_plant_ids[card_idx] in self.enabled_plants
+
+    def _is_water_row(self, row: int) -> bool:
+        # 地形来自当前课程场景的 game_mode_id，不能用 run-level rows 推断。
+        return int(self.game_mode) in POOL_GAME_MODE_IDS and row in POOL_WATER_ROWS
+
+    def _neutralize_inactive_cells(self, grid: np.ndarray) -> np.ndarray:
+        """把课程未启用行和场景外列的 grid observation 置零。"""
+        for row in range(min(self.rows, grid.shape[0])):
+            if not self._is_curriculum_row_enabled(row):
+                grid[row, :, :] = 0.0
+        if self.scenario_cols < grid.shape[1]:
+            grid[:, self.scenario_cols :, :] = 0.0
+        return grid
+
+    def _clear_inactive_rows(self, game_state) -> None:
+        """在课程未启用行定期放置火爆辣椒，清理无效区域僵尸。"""
+        if game_state is None or self.hook_client is None or not self.hook_client.connected:
+            return
+
+        game_clock = getattr(game_state, 'game_clock', None)
+        if game_clock is None:
+            return
+        game_clock = int(game_clock)
+
+        last_clear_clock = self._last_inactive_row_clear_clock
+        if (
+            last_clear_clock is not None
+            and game_clock >= last_clear_clock
+            and game_clock - last_clear_clock < _INACTIVE_ROW_CLEAR_INTERVAL_CS
+        ):
+            return
+
+        inactive_rows = sorted({
+            int(zombie.row)
+            for zombie in game_state.zombies
+            if (
+                0 <= int(zombie.row) < self.scenario_rows
+                and not self._is_curriculum_row_enabled(int(zombie.row))
+            )
+        })
+        if not inactive_rows:
+            return
+
+        self._last_inactive_row_clear_clock = game_clock
+        for row in inactive_rows:
+            self.hook_client.plant(
+                row,
+                _INACTIVE_ROW_CLEAR_COL,
+                int(PlantType.JALAPENO),
+            )
 
     def _is_pvz_running(self) -> bool:
         """检查 PVZ 进程是否在运行"""
@@ -470,6 +637,7 @@ class PVZEnv(gym.Env):
 
     def _start_from_main_menu_or_raise(self) -> int:
         """从主菜单进入游戏；若快捷流程失败，则走手动兜底流程。"""
+        # reset 已提交当前场景，这里使用场景的 game_mode_id 启动关卡。
         if self.hook_client.auto_start_game(
             mode=self.game_mode,
             cards=self.card_plant_ids,
@@ -497,6 +665,7 @@ class PVZEnv(gym.Env):
             info: 额外信息
         """
         super().reset(seed=seed)
+        scenario_changed = self._apply_pending_scenario()
         
         # 连接游戏
         if not self._connect():
@@ -550,6 +719,9 @@ class PVZEnv(gym.Env):
         if ui == 3:  # 游戏中
             ui = self._back_to_main_or_raise(timeout=2.0)
         
+        if ui == 2 and scenario_changed:
+            ui = self._back_to_main_or_raise(timeout=2.0)
+
         if ui == 2:  # 选卡界面
             ui = self._start_from_card_select_or_raise()
         
@@ -559,7 +731,7 @@ class PVZEnv(gym.Env):
         # 等待游戏开始
         self._require_ui(3, timeout=10.0, error_message="等待游戏开始超时")
         
-        # 设置初始阳光 (如果是教学模式)
+        # reset 时应用当前场景的初始阳光。
         if self.initial_sun != 50:
             # 等待一小会儿确保内存结构已初始化
             time.sleep(0.5)
@@ -594,6 +766,11 @@ class PVZEnv(gym.Env):
         self._episode_win = None  # 重置胜负状态
         self._victory_printed = False  # 重置胜利打印标记
         self._no_zombie_steps = 0  # 重置无僵尸计数
+        self._last_inactive_row_clear_clock = None
+        self.completed_sublevels = 0
+        self.sublevel_cleared_this_step = False
+        self._survival_sublevel_completion_latched = False
+        self.last_total_waves = 0
         
         # 重置热力图
         if hasattr(self, 'kill_heatmap'):
@@ -606,12 +783,21 @@ class PVZEnv(gym.Env):
         game_state = self.pvz.get_game_state()
         self._cached_game_state = game_state  # 缓存供第一步使用
         if game_state:
+            active_plants = [
+                plant for plant in game_state.plants
+                if self._is_curriculum_cell_enabled(plant.row, plant.col)
+            ]
+            active_zombies = [
+                zombie for zombie in game_state.zombies
+                if self._is_curriculum_row_enabled(zombie.row)
+            ]
             self.last_sun = game_state.sun
-            self.last_zombie_count = len(game_state.zombies)
-            self.last_zombies_state = list(game_state.zombies)  # 保存僵尸列表副本用于追踪击杀位置
-            self.last_plant_count = len(game_state.plants)
+            self.last_zombie_count = len(active_zombies)
+            self.last_zombies_state = list(active_zombies)  # 保存启用行僵尸用于追踪有效击杀
+            self.last_plant_count = len(active_plants)
             self.last_wave = game_state.wave
-            self.sunflower_count = sum(1 for p in game_state.plants if p.type == PlantType.SUNFLOWER)
+            self.last_total_waves = game_state.total_waves
+            self.sunflower_count = sum(1 for p in active_plants if p.type == PlantType.SUNFLOWER)
             # 初始化小推车状态
             for lm in game_state.lawnmowers:
                 if 0 <= lm.row < self.rows:
@@ -734,9 +920,21 @@ class PVZEnv(gym.Env):
         terminated = False
         truncated = False
         self._episode_win = None  # 记录胜负
+        self.sublevel_cleared_this_step = False
         
         if game_state is None:
             # 游戏状态读取失败
+            if self.win_condition == "survival_sublevels":
+                current_ui = self.hook_client.get_ui() if self.hook_client else -1
+                self._emit(
+                    "[Debug] game_state=None, "
+                    f"ui={current_ui}, "
+                    f"last_total_waves={self.last_total_waves}, "
+                    f"last_wave={self.last_wave}, "
+                    f"completed_sublevels={self.completed_sublevels}/{self.target_sublevels}",
+                    console_level=2,
+                    log_level=2,
+                )
             truncated = True
         else:
             # [调试] 输出关键状态
@@ -752,7 +950,29 @@ class PVZEnv(gym.Env):
                     console_level=2,
                     log_level=2,
                 )
-            
+            if (
+                self.win_condition == "survival_sublevels"
+                and (
+                    game_state.wave < self.last_wave
+                    or self.last_wave >= max(1, self.last_total_waves - 2)
+                    or game_state.wave >= max(1, game_state.total_waves - 2)
+                )
+            ):
+                self._emit(
+                    "[Debug] "
+                    f"prev=({self.last_wave}/{self.last_total_waves}) -> "
+                    f"curr=({game_state.wave}/{game_state.total_waves}), "
+                    f"level_end_cd={level_end_cd}, "
+                    f"refresh_cd={getattr(game_state, 'refresh_countdown', -1)}, "
+                    f"huge_wave_cd={getattr(game_state, 'huge_wave_countdown', -1)}, "
+                    f"game_clock={getattr(game_state, 'game_clock', -1)}, "
+                    f"completed={self.completed_sublevels}/{self.target_sublevels}",
+                    console_level=2,
+                    log_level=2,
+                )
+
+            self._clear_inactive_rows(game_state)
+
             # 计算奖励
             r_compute, compute_details, potential = self._compute_reward_debug(game_state)
             reward += r_compute
@@ -773,6 +993,7 @@ class PVZEnv(gym.Env):
                     
                     base_win = self.rewards.get('game_win', 3.0)
                     streak_bonus = self.win_streak * self.rewards.get('streak_bonus', 1.0)
+                    reward += base_win + streak_bonus
                     # 无僵尸空窗计数，用于额外胜利兜底
                     self._no_zombie_steps = 0
                     step_reward_details['win'] = base_win + streak_bonus
@@ -831,7 +1052,7 @@ class PVZEnv(gym.Env):
     def _calculate_potential(self, game_state) -> float:
         """
         计算势能函数 (Potential Function)，用于奖励塑形
-        利用阳光、植物布局、小推车、波数和僵尸威胁构建更平滑的潜势。
+        只使用课程启用区域的植物、僵尸和小推车，避免无效区域影响奖励。
         """
         if game_state is None:
             return 0.0
@@ -847,13 +1068,22 @@ class PVZEnv(gym.Env):
         wave_scale = cfg.get('wave_scale', 0.25)
 
         sun_potential = sun_scale * (game_state.sun / (game_state.sun + sun_cap))
+        active_plants = [
+            plant for plant in game_state.plants
+            if self._is_curriculum_cell_enabled(plant.row, plant.col)
+        ]
+        active_zombies = [
+            zombie for zombie in game_state.zombies
+            if self._is_curriculum_row_enabled(zombie.row)
+        ]
 
         plant_potential = 0.0
         column_coverage = set()
         row_counts = [0] * self.rows
-        max_col_index = max(1, self.cols - 1)
+        active_row_count = max(1, len(self.enabled_rows))
+        max_col_index = max(1, self.scenario_cols - 1)
 
-        for plant in game_state.plants:
+        for plant in active_plants:
             base_value = _PLANT_POTENTIAL_BASE.get(plant.type, 0.35)
             column_bias = 1.0 - (plant.col / max_col_index) if max_col_index > 0 else 0.5
             column_factor = 1.0 + 0.3 * column_bias
@@ -868,13 +1098,13 @@ class PVZEnv(gym.Env):
             if 0 <= plant.row < self.rows:
                 row_counts[plant.row] += 1
 
-        coverage_score = sum(min(1.0, count / 3.0) for count in row_counts) / max(1, self.rows)
+        coverage_score = sum(min(1.0, count / 3.0) for count in row_counts) / active_row_count
         coverage_bonus = coverage_score * spread_bonus
-        column_bonus = (len(column_coverage) / max(1, self.cols)) * spread_bonus
+        column_bonus = (len(column_coverage) / max(1, self.scenario_cols)) * spread_bonus
 
         lawnmowers_ready = 0
         for lm in getattr(game_state, 'lawnmowers', []):
-            if getattr(lm, 'state', 0) == 1:
+            if self._is_curriculum_row_enabled(lm.row) and getattr(lm, 'state', 0) == 1:
                 lawnmowers_ready += 1
 
         total_waves = getattr(game_state, 'total_waves', 0)
@@ -882,7 +1112,7 @@ class PVZEnv(gym.Env):
         wave_component = wave_progress * wave_scale
 
         zombie_threat = 0.0
-        for zombie in game_state.zombies:
+        for zombie in active_zombies:
             if getattr(zombie, 'hp', 0) <= 0:
                 continue
 
@@ -909,9 +1139,17 @@ class PVZEnv(gym.Env):
         return potential
 
     def _compute_reward_debug(self, game_state) -> Tuple[float, Dict[str, float], float]:
-        """计算奖励并返回详情 (调试版)"""
+        """计算启用区域奖励并返回详情，禁用行实体不参与奖励差分。"""
         reward = 0.0
         details = {}
+        active_plants = [
+            plant for plant in game_state.plants
+            if self._is_curriculum_cell_enabled(plant.row, plant.col)
+        ]
+        active_zombies = [
+            zombie for zombie in game_state.zombies
+            if self._is_curriculum_row_enabled(zombie.row)
+        ]
         
         # 存活奖励
         r_survival = self.rewards.get('survival_per_step', 0.0)
@@ -922,7 +1160,7 @@ class PVZEnv(gym.Env):
         # === 新增机制: 防线覆盖奖励 ===
         # 鼓励 AI 在每一行都部署"非经济类"植物，防止被单点突破
         covered_rows = set()
-        for plant in game_state.plants:
+        for plant in active_plants:
             # 排除向日葵(1)和阳光菇(4)，其他都算防守力量
             if plant.type not in [1, 4]: 
                 covered_rows.add(plant.row)
@@ -936,7 +1174,7 @@ class PVZEnv(gym.Env):
         # === 新增机制: 僵尸逼近压力 ===
         # 如果有僵尸越过警戒线 (X < 200)，给予持续压力惩罚
         proximity_penalty = 0.0
-        for zombie in game_state.zombies:
+        for zombie in active_zombies:
             if zombie.x < 200:
                 # 距离越近惩罚越大，最大约 -0.005/step
                 proximity_penalty += ((200 - zombie.x) / 200.0) * 0.005
@@ -953,7 +1191,7 @@ class PVZEnv(gym.Env):
             details['sun'] = r_sun
         
         # 僵尸击杀奖励与热力图更新
-        current_zombie_indices = {z.index for z in game_state.zombies}
+        current_zombie_indices = {z.index for z in active_zombies}
         killed_zombies = []
         
         # 确保 last_zombies_state 存在
@@ -961,6 +1199,9 @@ class PVZEnv(gym.Env):
             self.last_zombies_state = []
 
         for old_z in self.last_zombies_state:
+            if not self._is_curriculum_row_enabled(old_z.row):
+                # 禁用行的环境清理不属于 agent 行为，不能产生击杀奖励。
+                continue
             if old_z.index not in current_zombie_indices:
                 # 僵尸消失了
                 # 排除到达终点的僵尸 (x < -30，通常进家是 -50 左右)
@@ -971,7 +1212,7 @@ class PVZEnv(gym.Env):
                     # 找到最近的格子
                     r = int(old_z.row)
                     c = int((old_z.x - 10) / 80)  # 估算列
-                    if 0 <= r < 5 and 0 <= c < 9:
+                    if 0 <= r < self.rows and 0 <= c < self.cols:
                         self.kill_heatmap[r, c] += 1.0
         
         # 热力图衰减 (每步衰减，保持动态性)
@@ -992,7 +1233,7 @@ class PVZEnv(gym.Env):
         
         # 小推车状态检测
         for lm in game_state.lawnmowers:
-            if 0 <= lm.row < self.rows:
+            if 0 <= lm.row < self.rows and self._is_curriculum_row_enabled(lm.row):
                 was_available = self.lawnmower_available[lm.row]
                 is_available = (lm.state == 1)
                 
@@ -1003,11 +1244,11 @@ class PVZEnv(gym.Env):
                     details['lawnmower'] = penalty
         
         # 种植奖励
-        plant_diff = len(game_state.plants) - self.last_plant_count
+        plant_diff = len(active_plants) - self.last_plant_count
         if plant_diff > 0:
             new_plant = None
-            if game_state.plants:
-                new_plant = game_state.plants[-1]
+            if active_plants:
+                new_plant = active_plants[-1]
             
             if new_plant:
                 base_reward = 0.0
@@ -1029,7 +1270,7 @@ class PVZEnv(gym.Env):
                     
                     # 检查同位置是否有其他植物 (被保护对象)
                     inner_plant = None
-                    for p in game_state.plants:
+                    for p in active_plants:
                         if p.row == new_plant.row and p.col == new_plant.col and p.type != 30:
                             inner_plant = p
                             break
@@ -1068,7 +1309,7 @@ class PVZEnv(gym.Env):
                 reward += 0.3
                 details['plant'] = 0.3
             
-            self.sunflower_count = sum(1 for p in game_state.plants if p.type == PlantType.SUNFLOWER)
+            self.sunflower_count = sum(1 for p in active_plants if p.type == PlantType.SUNFLOWER)
         
         # 植物损失惩罚 (降低惩罚强度,避免AI过度保守)
         elif plant_diff < 0:
@@ -1077,7 +1318,7 @@ class PVZEnv(gym.Env):
             self.plants_lost += abs(plant_diff)
             details['plant_lost'] = r_lost
             
-            current_sunflowers = sum(1 for p in game_state.plants if p.type == PlantType.SUNFLOWER)
+            current_sunflowers = sum(1 for p in active_plants if p.type == PlantType.SUNFLOWER)
             sunflower_lost = self.sunflower_count - current_sunflowers
             if sunflower_lost > 0:
                 r_sf_lost = sunflower_lost * self.rewards.get('sunflower_lost', -10.0)  # -30 -> -10
@@ -1176,6 +1417,12 @@ class PVZEnv(gym.Env):
         
         if card_idx < 0 or card_idx >= len(self.card_costs):
             return False
+
+        # 与 action mask 共用课程限制，避免绕过禁用行列或植物。
+        if not self._is_curriculum_card_enabled(card_idx):
+            return False
+        if not self._is_curriculum_cell_enabled(row, col):
+            return False
         
         # 检查阳光
         cost = self.card_costs[card_idx]
@@ -1231,7 +1478,7 @@ class PVZEnv(gym.Env):
 
         # === 2. 地形与水生检查 ===
         # 泳池模式下，行 2 和 3 是水路 (0-indexed)
-        is_water_row = (self.rows == 6 and (row == 2 or row == 3))
+        is_water_row = self._is_water_row(row)
         is_aquatic_card = (card_plant_id in AQUATIC_PLANTS)
         
         if is_water_row:
@@ -1354,7 +1601,8 @@ class PVZEnv(gym.Env):
         终止条件:
         - 小推车丢失 (state != READY): 失败
         - 僵尸 X < -70: 失败 (僵尸进屋)
-        - level_end_countdown > 0: 胜利 (关卡即将结束)
+        - level_end_countdown > 0: 普通模式胜利
+        - survival_sublevels 达到目标小关数: 生存模式胜利
 
         Returns:
             (terminated, win)
@@ -1368,6 +1616,42 @@ class PVZEnv(gym.Env):
         if self._check_lawnmower_fail(game_state):
             return True, False
 
+        if self.win_condition == "survival_sublevels":
+            level_end_cd = getattr(game_state, 'level_end_countdown', 0)
+            countdown_detected = (
+                game_state.total_waves > 0
+                and game_state.wave >= game_state.total_waves
+                and level_end_cd > 0
+            )
+            if not countdown_detected:
+                self._survival_sublevel_completion_latched = False
+            if (
+                not self._survival_sublevel_completion_latched
+                and countdown_detected
+            ):
+                self.completed_sublevels += 1
+                self.sublevel_cleared_this_step = True
+                self._survival_sublevel_completion_latched = True
+                self._emit(
+                    "[Debug] sublevel clear detected: "
+                    f"prev=({self.last_wave}/{self.last_total_waves}) -> "
+                    f"curr=({game_state.wave}/{game_state.total_waves}), "
+                    f"level_end_cd={level_end_cd}, "
+                    "signal=level_end_countdown, "
+                    f"completed_sublevels={self.completed_sublevels}/{self.target_sublevels}",
+                    console_level=2,
+                    log_level=2,
+                )
+                if self.completed_sublevels >= self.target_sublevels:
+                    self._emit(
+                        "[Debug] survival_sublevels win confirmed: "
+                        f"completed_sublevels={self.completed_sublevels}/{self.target_sublevels}",
+                        console_level=2,
+                        log_level=2,
+                    )
+                    return True, True
+            return False, False
+
         # 检查胜利条件: level_end_countdown > 0
         level_end_cd = getattr(game_state, 'level_end_countdown', 0)
 
@@ -1379,12 +1663,21 @@ class PVZEnv(gym.Env):
         return False, False
     
     def _update_last_state(self, game_state, potential=None):
-        """更新上一帧状态"""
+        """按课程启用区域更新上一帧状态，避免无效行影响差分奖励。"""
+        active_plants = [
+            plant for plant in game_state.plants
+            if self._is_curriculum_cell_enabled(plant.row, plant.col)
+        ]
+        active_zombies = [
+            zombie for zombie in game_state.zombies
+            if self._is_curriculum_row_enabled(zombie.row)
+        ]
         self.last_sun = game_state.sun
-        self.last_zombie_count = len(game_state.zombies)
-        self.last_zombies_state = list(game_state.zombies)  # 更新僵尸列表副本
-        self.last_plant_count = len(game_state.plants)
+        self.last_zombie_count = len(active_zombies)
+        self.last_zombies_state = list(active_zombies)  # 更新启用行僵尸副本
+        self.last_plant_count = len(active_plants)
         self.last_wave = game_state.wave
+        self.last_total_waves = game_state.total_waves
         if potential is None:
             potential = self._calculate_potential(game_state)
         self.last_potential = potential
@@ -1396,11 +1689,16 @@ class PVZEnv(gym.Env):
         
         # 从配置获取维度
         obs_config = self.config.get('observation_space', {})
-        grid_shape = obs_config.get('grid', {}).get('shape', [self.rows, self.cols, 13])
-        global_dim = obs_config.get('global', {}).get('total_dim', 71)  # 增加新特征
-        card_attr_shape = tuple(
-            obs_config.get('card_attributes', {}).get('shape', [self.num_cards, 7])
-        )
+        if self.env_spec is not None:
+            grid_shape = [self.env_spec.rows, self.env_spec.cols, self.env_spec.grid_channels]
+            global_dim = self.env_spec.global_feature_dim
+            card_attr_shape = tuple(self.env_spec.card_attribute_shape)
+        else:
+            grid_shape = obs_config.get('grid', {}).get('shape', [self.rows, self.cols, 13])
+            global_dim = obs_config.get('global', {}).get('total_dim', 71)  # 增加新特征
+            card_attr_shape = tuple(
+                obs_config.get('card_attributes', {}).get('shape', [self.num_cards, 7])
+            )
         
         # 网格特征
         grid = np.zeros(tuple(grid_shape), dtype=np.float32)
@@ -1465,7 +1763,10 @@ class PVZEnv(gym.Env):
         数据利用率：96%
         """
         obs_config = self.config.get('observation_space', {})
-        grid_shape = obs_config.get('grid', {}).get('shape', [self.rows, self.cols, 13])
+        if self.env_spec is not None:
+            grid_shape = [self.env_spec.rows, self.env_spec.cols, self.env_spec.grid_channels]
+        else:
+            grid_shape = obs_config.get('grid', {}).get('shape', [self.rows, self.cols, 13])
         grid = np.zeros(tuple(grid_shape), dtype=np.float32)
         n_channels = grid_shape[2]
         
@@ -1694,7 +1995,7 @@ class PVZEnv(gym.Env):
             max_kills = np.max(self.kill_heatmap) if np.max(self.kill_heatmap) > 0 else 1.0
             grid[:, :, 12] = self.kill_heatmap / max_kills
         
-        return grid
+        return self._neutralize_inactive_cells(grid)
     
     def _get_zombie_threat(self, zombie_type: int) -> float:
         """获取僵尸类型威胁度 (完整版)"""
@@ -1732,8 +2033,20 @@ class PVZEnv(gym.Env):
     def _build_global_features(self, game_state) -> np.ndarray:
         """构建增强全局特征 (71维)"""
         obs_config = self.config.get('observation_space', {})
-        global_dim = obs_config.get('global', {}).get('total_dim', 71)
+        global_dim = (
+            self.env_spec.global_feature_dim
+            if self.env_spec is not None
+            else obs_config.get('global', {}).get('total_dim', 71)
+        )
         features = np.zeros(global_dim, dtype=np.float32)
+        active_plants = [
+            plant for plant in game_state.plants
+            if self._is_curriculum_cell_enabled(plant.row, plant.col)
+        ]
+        active_zombies = [
+            zombie for zombie in game_state.zombies
+            if self._is_curriculum_row_enabled(zombie.row)
+        ]
         
         idx = 0
         
@@ -1742,7 +2055,7 @@ class PVZEnv(gym.Env):
         idx += 1
         
         # 2. 向日葵数量 (归一化，假设最多20)
-        sunflower_count = sum(1 for p in game_state.plants if p.type == PlantType.SUNFLOWER)
+        sunflower_count = sum(1 for p in active_plants if p.type == PlantType.SUNFLOWER)
         features[idx] = min(1.0, sunflower_count / 20.0)
         idx += 1
         
@@ -1765,22 +2078,25 @@ class PVZEnv(gym.Env):
         idx += 1
         
         # 7. 僵尸总数 (归一化)
-        features[idx] = min(1.0, len(game_state.zombies) / 100.0)
+        features[idx] = min(1.0, len(active_zombies) / 100.0)
         idx += 1
         
         # 8. 僵尸总血量 (归一化)
-        total_zombie_hp = sum(z.total_hp for z in game_state.zombies)
+        total_zombie_hp = sum(z.total_hp for z in active_zombies)
         features[idx] = min(1.0, total_zombie_hp / 50000.0)  # 假设最大50000
         idx += 1
         
         # 9. 植物总数 (归一化)
-        features[idx] = min(1.0, len(game_state.plants) / max(1, self.rows * self.cols))
+        features[idx] = min(1.0, len(active_plants) / max(1, self.rows * self.cols))
         idx += 1
         
         # 10. 小推车状态 (5维，每行一个)
         if hasattr(game_state, 'lawnmowers'):
             for row in range(self.rows):
-                has_mower = any(lm.row == row and not lm.is_dead for lm in game_state.lawnmowers)
+                has_mower = (
+                    self._is_curriculum_row_enabled(row)
+                    and any(lm.row == row and not lm.is_dead for lm in game_state.lawnmowers)
+                )
                 if idx < global_dim:
                     features[idx] = 1.0 if has_mower else 0.0
                     idx += 1
@@ -1807,7 +2123,7 @@ class PVZEnv(gym.Env):
         
         # 13. 每行威胁度 (5维)
         row_threats = [0.0] * self.rows
-        for zombie in game_state.zombies:
+        for zombie in active_zombies:
             if 0 <= zombie.row < self.rows:
                 # 威胁度 = 血量 × 类型系数 × 距离系数
                 threat = zombie.total_hp / 1000.0  # 血量归一化
@@ -1821,7 +2137,7 @@ class PVZEnv(gym.Env):
         
         # 14. 每行防御力 (5维)
         row_defense = [0.0] * self.rows
-        for plant in game_state.plants:
+        for plant in active_plants:
             if 0 <= plant.row < self.rows:
                 # 根据植物类型给防御值
                 if plant.type == 3:  # 坚果墙
@@ -1850,7 +2166,10 @@ class PVZEnv(gym.Env):
         # 17. 冰道状态 (5维，每行一个)
         if hasattr(game_state, 'ice_trails'):
             for row in range(self.rows):
-                has_ice = any(trail.get('row') == row and trail.get('timer', 0) > 0 for trail in game_state.ice_trails)
+                has_ice = (
+                    self._is_curriculum_row_enabled(row)
+                    and any(trail.get('row') == row and trail.get('timer', 0) > 0 for trail in game_state.ice_trails)
+                )
                 if idx < global_dim:
                     features[idx] = 1.0 if has_ice else 0.0
                     idx += 1
@@ -1910,6 +2229,8 @@ class PVZEnv(gym.Env):
             
             # 获取当前卡片的植物ID
             card_plant_id = self.card_plant_ids[card_idx] if hasattr(self, 'card_plant_ids') else -1
+            if not self._is_curriculum_card_enabled(card_idx):
+                continue
             is_pumpkin_card = (card_plant_id == 30)
             is_aquatic_card = (card_plant_id in AQUATIC_PLANTS)
             is_upgrade_card = (card_plant_id in UPGRADE_PLANTS)
@@ -1917,6 +2238,9 @@ class PVZEnv(gym.Env):
             for row in range(self.rows):
                 for col in range(self.cols):
                     action_idx = card_idx * (self.rows * self.cols) + row * self.cols + col
+                    # 课程限制只屏蔽动作，不改变固定 action space 大小。
+                    if not self._is_curriculum_cell_enabled(row, col):
+                        continue
                     
                     plants_on_cell = cell_plants.get((row, col), [])
                     is_empty = len(plants_on_cell) == 0
@@ -1942,7 +2266,7 @@ class PVZEnv(gym.Env):
                         # 上面的 base_id in plants_on_cell 已经涵盖了
                     
                     # === 2. 地形与水生检查 ===
-                    elif self.rows == 6 and (row == 2 or row == 3): # 泳池行
+                    elif self._is_water_row(row): # 泳池行
                         if is_aquatic_card:
                             # 水生植物 (睡莲/海草)
                             if card_plant_id == 16: # 睡莲
@@ -2021,6 +2345,15 @@ class PVZEnv(gym.Env):
             "plants_lost": self.plants_lost,
             "win": self._episode_win if self._episode_win is not None else False,
             "game_ended": self._episode_win is not None,  # True=游戏正常结束, False=超时/中断
+            "win_condition": self.win_condition,
+            "target_sublevels": self.target_sublevels,
+            "completed_sublevels": self.completed_sublevels,
+            "sublevel_cleared_this_step": self.sublevel_cleared_this_step,
+            "current_sublevel_index": (
+                self.completed_sublevels
+                if self._episode_win is True and self.sublevel_cleared_this_step
+                else self.completed_sublevels + 1
+            ),
             # Debug/diagnostic fields
             "hook_connected": bool(self.hook_client.connected) if self.hook_client else False,
             "pvz_attached": bool(self.pvz.is_attached()) if self.pvz else False,

@@ -7,6 +7,7 @@ from .simple_monitor import SimpleMonitorCallback
 from .advanced_speed import AdvancedSpeedCallback
 from .async_save import AsyncSingleModelCallback
 from .heatmap import HeatmapCallback
+from .ppo_curriculum import PPOCurriculumCallback
 from .ppo_metrics import PPOMetricsCallback
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "AdvancedSpeedCallback",
     "AsyncSingleModelCallback",
     "HeatmapCallback",
+    "PPOCurriculumCallback",
     "PPOMetricsCallback",
 ]
