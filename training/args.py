@@ -98,14 +98,14 @@ def _add_common_args(parser):
         dest="no_auto_start",
         action="store_false",
         default=argparse.SUPPRESS,
-        help="自动启动游戏和注入DLL",
+        help="根据 --num_envs 自动启动对应数量的游戏进程并注入 DLL",
     )
     common.add_argument(
         "--no_auto_start",
         dest="no_auto_start",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="禁用自动启动 (手动启动游戏和注入)",
+        help="禁用自动启动 (需手动启动游戏进程和注入 DLL)",
     )
     common.add_argument(
         "--game_path",

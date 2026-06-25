@@ -60,10 +60,25 @@ def list_pvz_processes() -> List[int]:
 def find_pvz_process() -> Optional[int]:
     """
     查找PVZ进程
-    
+
     Returns:
         进程ID，未找到返回None
     """
+    pids = list_pvz_processes()
+    return pids[0] if pids else None
+
+
+def find_new_pvz_process(known_pids: set) -> Optional[int]:
+    """在已知 PID 集合之外查找新启动的 PVZ 进程。
+
+    用于多实例启动场景：先记录启动前的 PID 集合，
+    启动新游戏进程后调用此函数获取新 PID。
+    """
+    current = set(list_pvz_processes())
+    new = current - known_pids
+    if new:
+        return min(new)  # 多个新进程时取最小值（正常一次只启动一个）
+    # 如果没有新进程，回退到查找任意 PVZ 进程
     pids = list_pvz_processes()
     return pids[0] if pids else None
 
