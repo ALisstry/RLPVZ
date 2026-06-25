@@ -173,11 +173,15 @@ rewards:
   plant_sunflower: 0.0
   plant_attacker: 0.0
   plant_wall: 0.0
+  plant_lilypad: 0.0
+  plant_pumpkin: 0.0
+  plant_other: 0.0
   plant_lost: 0.0
   sunflower_lost: 0.0
   lawnmower_triggered: 0.0
   game_lose: 0.0
   invalid_action: 0.0
+  wait_with_sun: 0.0
 
   # Potential-based shaping: disabled for clean baseline
   potential:

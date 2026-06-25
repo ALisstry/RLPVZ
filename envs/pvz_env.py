@@ -870,21 +870,20 @@ class PVZEnv(gym.Env):
         success = self._execute_action(action, self._cached_game_state)
         
         if not success:
-            # 无效动作：小惩罚（鼓励探索但不鼓励乱点）
             r_invalid = self.rewards.get('invalid_action', -0.01)
-            reward += r_invalid
-            step_reward_details['invalid'] = r_invalid
+            if r_invalid != 0:
+                reward += r_invalid
+                step_reward_details['invalid'] = r_invalid
             self._action_stats['invalid'] += 1
         else:
             if action == self.n_actions - 1:  # 等待动作
                 self._action_stats['wait'] += 1
-                # 等待时如果阳光充足，给惩罚（鼓励种植）
-                # 修正：阈值提高到 300，允许 AI 攒钱买双发/寒冰 (原 100)
-                if self._cached_game_state:
+                wait_penalty = self.rewards.get('wait_with_sun', -0.02)
+                if wait_penalty != 0 and self._cached_game_state:
                     sun = self._cached_game_state.sun
-                    if sun >= 300:  # 只有阳光溢出才惩罚
-                        reward += -0.02
-                        step_reward_details['wait_with_sun'] = -0.02
+                    if sun >= 300:
+                        reward += wait_penalty
+                        step_reward_details['wait_with_sun'] = wait_penalty
             elif action < self.n_plant_actions:
                 self._action_stats['plant'] += 1
                 # 成功种植有奖励（在 _compute_reward 中）
@@ -1250,60 +1249,54 @@ class PVZEnv(gym.Env):
                 base_reward = 0.0
                 if new_plant.type == PlantType.SUNFLOWER:
                     base_reward = self.rewards.get('plant_sunflower', 0.3)
-                    if new_plant.col <= 2: base_reward += 0.2
-                    elif new_plant.col >= 5: base_reward -= 0.2
-                elif new_plant.type == 16:  # Lily Pad (睡莲)
-                    base_reward = 0.4  # 鼓励在水域铺睡莲
-                    # 在水域中间行(第3、4行)种植睡莲给额外奖励
-                    if 2 <= new_plant.row <= 3:
+                    if base_reward != 0:
+                        if new_plant.col <= 2: base_reward += 0.2
+                        elif new_plant.col >= 5: base_reward -= 0.2
+                elif new_plant.type == 16:  # Lily Pad
+                    base_reward = self.rewards.get('plant_lilypad', 0.4)
+                    if base_reward != 0 and 2 <= new_plant.row <= 3:
                         base_reward += 0.2
                 elif new_plant.type == PlantType.WALLNUT:
                     base_reward = self.rewards.get('plant_wall', 0.2)
-                    if new_plant.col >= 5: base_reward += 0.2
-                elif new_plant.type == 30: # PUMPKIN (南瓜头)
-                    # 南瓜头逻辑：鼓励保护核心植物，严惩后排空放
-                    base_reward = 0.1
-                    
-                    # 检查同位置是否有其他植物 (被保护对象)
-                    inner_plant = None
-                    for p in active_plants:
-                        if p.row == new_plant.row and p.col == new_plant.col and p.type != 30:
-                            inner_plant = p
-                            break
-                    
-                    if inner_plant:
-                        # 成功套盾：给予高额奖励
-                        base_reward += 0.3
-                        # 保护核心植物 (双发/火炬/高坚果/杨桃) 额外加分
-                        if inner_plant.type in [7, 22, 23, 29]: 
+                    if base_reward != 0 and new_plant.col >= 5:
+                        base_reward += 0.2
+                elif new_plant.type == 30:  # PUMPKIN
+                    base_reward = self.rewards.get('plant_pumpkin', 0.1)
+                    if base_reward != 0:
+                        inner_plant = None
+                        for p in active_plants:
+                            if p.row == new_plant.row and p.col == new_plant.col and p.type != 30:
+                                inner_plant = p
+                                break
+                        if inner_plant:
                             base_reward += 0.3
-                        # 保护前排受威胁植物
-                        if new_plant.col >= 4:
-                            base_reward += 0.2
-                    else:
-                        # 空放南瓜头 (没有套在植物上)
-                        if new_plant.col >= 7: 
-                            # 只有在最前排当临时墙用才给一点分
-                            base_reward += 0.1
+                            if inner_plant.type in [7, 22, 23, 29]:
+                                base_reward += 0.3
+                            if new_plant.col >= 4:
+                                base_reward += 0.2
                         else:
-                            # 在后排空地乱放南瓜头：给予惩罚
-                            base_reward -= 0.3
+                            if new_plant.col >= 7:
+                                base_reward += 0.1
+                            else:
+                                base_reward -= 0.3
                 else:
                     base_reward = self.rewards.get('plant_attacker', 0.25)
-                    # 额外奖励：如果种的是昂贵的重武器 (Cost > 150)
-                    # 34=Melon-pult, 43=Cattail, 35=Winter Melon
-                    if new_plant.type in [34, 35]:
-                        base_reward += 0.5  # 适度奖励重武器
-                    elif new_plant.type == 43: # Cattail (香蒲)
-                        base_reward += 0.8  # 香蒲奖励,但不过度激进
-                    
-                    if 2 <= new_plant.col <= 6: base_reward += 0.1
-                
-                reward += base_reward
-                details['plant'] = base_reward
+                    if base_reward != 0:
+                        if new_plant.type in [34, 35]:
+                            base_reward += 0.5
+                        elif new_plant.type == 43:
+                            base_reward += 0.8
+                        if 2 <= new_plant.col <= 6:
+                            base_reward += 0.1
+
+                if base_reward != 0:
+                    reward += base_reward
+                    details['plant'] = base_reward
             else:
-                reward += 0.3
-                details['plant'] = 0.3
+                base_reward = self.rewards.get('plant_other', 0.3)
+                if base_reward != 0:
+                    reward += base_reward
+                    details['plant'] = base_reward
             
             self.sunflower_count = sum(1 for p in active_plants if p.type == PlantType.SUNFLOWER)
         
