@@ -309,12 +309,6 @@ class AsyncDDQNTrainer:
                         "per_alpha": self._per_alpha,
                         "per_beta_start": self._per_beta_start,
                     },
-                    extra={
-                        "optimizer_state_dict": self.learner.network.optimizer.state_dict(),
-                        "buffer": self.buffer,
-                        "episode_count": self.stats.episode_count,
-                        "transition_count": self.transition_count,
-                    },
                 )
                 self.reporter.print_checkpoint(self.stats.episode_count)
 

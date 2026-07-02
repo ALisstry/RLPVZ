@@ -12,10 +12,7 @@
 # Game Settings — Survival: Day  (same as baseline)
 # =============================================================================
 game:
-  mode: "survival_day"           # 生存模式(白天)
   game_mode_id: 1                # GAMEMODE_SURVIVAL_NORMAL_STAGE_1 = 生存白天
-  background_type: 0             # BACKGROUND_DAY
-  map: "day"                     # 草地 (5 rows, no pool)
   rows: 5                        # 5 rows
   cols: 9                        # 9 columns
   initial_sun: 50
@@ -91,7 +88,6 @@ cards:
 # Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451  (same as baseline)
 # =============================================================================
 action_space:
-  type: "discrete"
   size: 451
 
   structure:
@@ -100,109 +96,41 @@ action_space:
     wait_action: 1
 
 # =============================================================================
-# Observation Space — matches paper's 596-dim flat vector spec  (same as baseline)
-# Grid channels: 13-channel grid (used by PPO / PVZEnv internally)
-# DDQN adapter will extract paper-format: plant one-hot + HP + zombie HP + sun + cooldown
+# Observation Space — Paper-format 596-dim flat vector
+#
+# DDQN adapter (ddqn_paper_observation=true) extracts from 13-ch grid:
+#   sun count           :  1 dim
+#   card cooldowns      : 10 dim
+#   plant type one-hot  : 5×9×(10+1) = 495 dim  (card-slot one-hot, not plant-id)
+#   plant HP grid       : 5×9 = 45 dim
+#   zombie HP grid      : 5×9 = 45 dim
+#   ─────────────────────────────────────────────
+#   Total               : 596 dim
+#
+# Grid shape & global total_dim kept for PVZEnv Dict obs init (PPO compat).
+# global_features & card_attributes are ignored by DDQN paper adapter.
 # =============================================================================
 observation_space:
   grid:
     shape: [5, 9, 13]           # 5 rows × 9 cols × 13 channels
-    channels:
-      - "plant_type"
-      - "plant_hp"
-      - "plant_function"
-      - "zombie_density"
-      - "zombie_hp"
-      - "zombie_threat"
-      - "zombie_urgency"
-      - "zombie_status"
-      - "bullet_density"
-      - "bullet_threat"
-      - "dps_heatmap"
-      - "threat_heatmap"
-      - "kill_heatmap"
 
   global:
-    features:
-      - "sun"
-      - "sun_producing"
-      - "wave"
-      - "total_waves"
-      - "wave_countdown"
-      - "game_clock"
-      - "zombie_count"
-      - "zombie_total_hp"
-      - "plant_count"
-      - "lawnmower_status"
-      - "cards_cd_ratio"
-      - "cards_affordable"
-      - "row_threat"
-      - "row_defense"
-      - "huge_wave_countdown"
-      - "zombie_refresh_hp"
-      - "ice_trails"
-      - "next_wave_preview"
-    total_dim: 65
+    total_dim: 61               # actual dims filled by _build_global_features()
 
   card_attributes:
     shape: [10, 7]
 
 # =============================================================================
-# Reward — sparse config matching baseline, with debug override
+# Reward — hardcoded zombie_damage (zombie HP reduction per step).
+#
+# All auxiliary rewards are disabled because rewards.use_shaped is not set.
+# These 4 keys are read directly in step() and default to non-zero — force to 0.
 # =============================================================================
 rewards:
-  # ═══ Debug mode: reward = zombie total_hp reduction per step ═══
-  debug_mode: "zombie_damage"
-
-  # Below matches baseline exactly (ignored when debug_mode is active)
-  zombie_kill:
-    use_type_rewards: true
-    default: 0.3
-    zombie: 0.2
-    flag: 0.2
-    conehead: 0.3
-    polevaulter: 0.5
-    buckethead: 0.6
-    newspaper: 0.3
-    screendoor: 0.6
-    football: 0.8
-    dancing: 0.5
-    backup: 0.2
-    duckytube: 0.2
-    snorkel: 0.4
-    bobsled: 0.4
-    dolphin: 0.5
-    jackinbox: 0.5
-    pogo: 0.5
-    yeti: 0.8
-    catapult: 0.7
-    imp: 0.2
-
-  coverage:
-    scale: 0.0
-  proximity:
-    scale: 0.0
-
-  sun_collect: 0.0
-  wave_complete: 0.0
-  game_win: 0.0
-  streak_bonus: 0.0
-  survival_per_step: 0.0
-  plant_sunflower: 0.0
-  plant_attacker: 0.0
-  plant_wall: 0.0
-  plant_lilypad: 0.0
-  plant_pumpkin: 0.0
-  plant_other: 0.0
-  plant_lost: 0.0
-  sunflower_lost: 0.0
-  lawnmower_triggered: 0.0
-  game_lose: 0.0
-  invalid_action: 0.0
-  wait_with_sun: 0.0
-
-  potential:
-    delta_scale: 0.0
+  invalid_action: 0.0          # default -0.01
+  wait_with_sun: 0.0           # default -0.02
+  game_win: 0.0                # default +3.0
+  game_lose: 0.0               # default -3.0
 
 # =============================================================================
 # Training Configuration  (same as baseline except batch/buffer/frameskip)
@@ -220,14 +148,11 @@ training:
     wait_time: 3.0
     speed: 10.0
     frameskip: 49               # DEBUG: 1 step ≈ 1 sec game time (baseline: 24)
-    auto_resume: true
+    auto_resume: false
     env_console_log_level: 0
     file_log_level: 1
     execution: "async_worker_pool"
     curriculum: "none"
-
-    # Paper observation format (one-hot + HP) — same as baseline
-    ddqn_paper_observation: true
 
   ddqn:
     ddqn_episodes: 10000        # same as baseline
@@ -235,11 +160,9 @@ training:
     ddqn_batch_size: 512        # DEBUG: larger batch (baseline: 32)
     ddqn_buffer_size: 100000    # DEBUG: larger buffer (baseline: 50000)
     ddqn_burn_in: 10000         # same as baseline
-    ddqn_lr: 0.001              # same as baseline
+    ddqn_lr: 0.0001              # same as baseline
     ddqn_update_freq: 32
     ddqn_sync_freq: 2000        # same as baseline
-    ddqn_eval_freq: 100
-    ddqn_eval_iters: 5
     ddqn_checkpoint_freq: 500
     ddqn_plot_freq: 50
     ddqn_plot_path: null
@@ -251,4 +174,3 @@ training:
 
   env:
     max_steps: 10000
-    normalize_obs: true

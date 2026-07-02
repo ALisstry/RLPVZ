@@ -1009,11 +1009,10 @@ class PVZEnv(gym.Env):
         
         # 解析动作 - 使用上一帧的缓存状态检查
         success = self._execute_action(action, self._cached_game_state)
-        
-        _debug_mode = self.rewards.get('debug_mode', None)
+
         if not success:
             r_invalid = self.rewards.get('invalid_action', -0.01)
-            if r_invalid != 0 and not _debug_mode:
+            if r_invalid != 0:
                 reward += r_invalid
                 step_reward_details['invalid'] = r_invalid
             self._action_stats['invalid'] += 1
@@ -1021,7 +1020,7 @@ class PVZEnv(gym.Env):
             if action == self.n_actions - 1:  # 等待动作
                 self._action_stats['wait'] += 1
                 wait_penalty = self.rewards.get('wait_with_sun', -0.02)
-                if wait_penalty != 0 and not _debug_mode and self._cached_game_state:
+                if wait_penalty != 0 and self._cached_game_state:
                     sun = self._cached_game_state.sun
                     if sun >= 300:
                         reward += wait_penalty
@@ -1133,20 +1132,18 @@ class PVZEnv(gym.Env):
                     self.win_streak += 1
                     self.max_win_streak = max(self.max_win_streak, self.win_streak)
 
-                    if not _debug_mode:
-                        base_win = self.rewards.get('game_win', 3.0)
-                        streak_bonus = self.win_streak * self.rewards.get('streak_bonus', 1.0)
-                        reward += base_win + streak_bonus
-                        step_reward_details['win'] = base_win + streak_bonus
+                    base_win = self.rewards.get('game_win', 3.0)
+                    streak_bonus = self.win_streak * self.rewards.get('streak_bonus', 1.0)
+                    reward += base_win + streak_bonus
+                    step_reward_details['win'] = base_win + streak_bonus
                     # 无僵尸空窗计数，用于额外胜利兜底
                     self._no_zombie_steps = 0
                 else:
                     # 失败，连胜归零
                     self.win_streak = 0
-                    if not _debug_mode:
-                        r_lose = self.rewards.get('game_lose', -3.0)
-                        reward += r_lose
-                        step_reward_details['lose'] = r_lose
+                    r_lose = self.rewards.get('game_lose', -3.0)
+                    reward += r_lose
+                    step_reward_details['lose'] = r_lose
                     # 失败时主动返回主菜单，准备下一次 reset
                     # 异步 reset 模式下跳过，留给后台 reset 线程处理
                     if not self._skip_failure_handling:
@@ -1301,7 +1298,11 @@ class PVZEnv(gym.Env):
         return potential
 
     def _compute_reward_debug(self, game_state) -> Tuple[float, Dict[str, float], float]:
-        """计算启用区域奖励并返回详情，禁用行实体不参与奖励差分。"""
+        """计算启用区域奖励并返回详情，禁用行实体不参与奖励差分。
+
+        默认奖励函数：zombie HP reduction per step（僵尸掉血量）。
+        可通过 ``rewards.use_shaped: true`` 启用额外的塑形奖励。
+        """
         reward = 0.0
         details = {}
         active_plants = [
@@ -1313,29 +1314,30 @@ class PVZEnv(gym.Env):
             if self._is_curriculum_row_enabled(zombie.row)
         ]
 
-        # ── Debug reward mode: zombie HP reduction per step ──
-        debug_mode = self.rewards.get('debug_mode', None)
-        if debug_mode == "zombie_damage":
-            prev_hp_map = {}
-            if hasattr(self, 'last_zombies_state'):
-                for z in self.last_zombies_state:
-                    prev_hp_map[z.index] = float(getattr(z, 'total_hp', 0))
+        # ── Default reward: zombie HP reduction per step ──
+        prev_hp_map = {}
+        if hasattr(self, 'last_zombies_state'):
+            for z in self.last_zombies_state:
+                prev_hp_map[z.index] = float(getattr(z, 'total_hp', 0))
 
-            damage = 0.0
-            curr_indices = set()
-            for z in active_zombies:
-                curr_hp = float(getattr(z, 'total_hp', 0))
-                curr_indices.add(z.index)
-                if z.index in prev_hp_map:
-                    damage += max(0.0, prev_hp_map[z.index] - curr_hp)
+        damage = 0.0
+        curr_indices = set()
+        for z in active_zombies:
+            curr_hp = float(getattr(z, 'total_hp', 0))
+            curr_indices.add(z.index)
+            if z.index in prev_hp_map:
+                damage += max(0.0, prev_hp_map[z.index] - curr_hp)
 
-            # Zombies that disappeared (killed / removed) — count all remaining HP as damage
-            for idx, prev_hp in prev_hp_map.items():
-                if idx not in curr_indices:
-                    damage += prev_hp
+        # Zombies that disappeared (killed / removed) — count all remaining HP as damage
+        for idx, prev_hp in prev_hp_map.items():
+            if idx not in curr_indices:
+                damage += prev_hp
 
-            reward = damage
-            details['zombie_damage'] = damage
+        reward = damage
+        details['zombie_damage'] = damage
+
+        # ── Optional shaped reward (opt-in via rewards.use_shaped: true) ──
+        if not self.rewards.get('use_shaped', False):
             potential = self._calculate_potential(game_state)
             return reward, details, potential
 

@@ -91,6 +91,7 @@ class DDQNLearner:
         try:
             loss, td_errors = self.calculate_loss(batch, is_weights)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=10.0)
             self.network.optimizer.step()
             return (
                 float(loss.detach().cpu().item())

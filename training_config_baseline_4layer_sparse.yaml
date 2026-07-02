@@ -225,9 +225,6 @@ training:
     execution: "async_worker_pool"
     curriculum: "none"
 
-    # Paper observation format (one-hot + HP)
-    ddqn_paper_observation: true
-
   ddqn:
     ddqn_episodes: 10000        # paper: 10,000 episodes
     ddqn_gamma: 0.99            # paper spec

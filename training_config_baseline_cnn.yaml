@@ -147,13 +147,11 @@ observation_space:
     shape: [10, 7]
 
 # =============================================================================
-# Reward — sparse config matching baseline, with debug override
+# Reward — zombie HP reduction per step (default) + sparse aux
 # =============================================================================
 rewards:
-  # ═══ Debug mode: reward = zombie total_hp reduction per step ═══
-  debug_mode: "zombie_damage"
-
-  # Below matches baseline exactly (ignored when debug_mode is active)
+  # Default reward = zombie total_hp reduction per step (zombie_damage)
+  # Auxiliary rewards below (all 0.0 by default) are added on top.
   zombie_kill:
     use_type_rewards: true
     default: 0.3
@@ -224,9 +222,6 @@ training:
     file_log_level: 1
     execution: "async_worker_pool"
     curriculum: "none"
-
-    # Paper observation format (one-hot + HP) — same as baseline
-    ddqn_paper_observation: true
 
     # Use dual-branch CNN instead of MLP
     use_cnn: true

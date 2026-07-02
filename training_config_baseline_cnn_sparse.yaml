@@ -227,9 +227,6 @@ training:
     execution: "async_worker_pool"
     curriculum: "none"
 
-    # Paper observation format (one-hot + HP)
-    ddqn_paper_observation: true
-
     # Use dual-branch CNN instead of MLP
     use_cnn: true
 
