@@ -234,7 +234,7 @@ training:
   ddqn:
     ddqn_episodes: 10000        # same as baseline
     ddqn_gamma: 0.99            # same as baseline
-    ddqn_batch_size: 500        # DEBUG: larger batch (baseline: 32)
+    ddqn_batch_size: 512        # DEBUG: larger batch (baseline: 32)
     ddqn_buffer_size: 100000    # DEBUG: larger buffer (baseline: 50000)
     ddqn_burn_in: 10000         # same as baseline
     ddqn_lr: 0.001              # same as baseline

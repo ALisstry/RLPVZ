@@ -1,5 +1,4 @@
 import os
-from collections import deque
 
 import numpy as np
 import torch
@@ -38,11 +37,21 @@ def resolve_load_path(args, run_paths=None):
 # ─────────────────────────────────────────────────────────────────────────
 
 def _serialize_buffer(buffer):
-    """Convert replay buffer deque → dict of numpy arrays for serialization."""
-    if buffer is None or len(buffer.replay_memory) == 0:
+    """Convert replay buffer → dict of numpy arrays + optional PER tree."""
+    if buffer is None or len(buffer) == 0:
         return None
-    entries = list(buffer.replay_memory)
-    return {
+
+    # Gather all valid entries (skip None slots in pre-allocated ring buffer)
+    n = len(buffer)
+    entries = []
+    for i in range(buffer.memory_size):
+        e = buffer.replay_memory[i]
+        if e is not None:
+            entries.append(e)
+    # Truncate to actual stored count (ring buffer may wrap)
+    entries = entries[:n]
+
+    data = {
         "states": np.stack([e.state for e in entries]),
         "actions": np.array([e.action for e in entries], dtype=np.int64),
         "rewards": np.array([e.reward for e in entries], dtype=np.float32),
@@ -52,33 +61,53 @@ def _serialize_buffer(buffer):
         "next_masks": np.stack([e.next_mask for e in entries]),
     }
 
+    # PER SumTree state (for exact priority restoration)
+    if hasattr(buffer, 'sum_tree'):
+        data["_per_tree"] = buffer.sum_tree.tree.copy()
+        data["_per_ptr"] = buffer._write_ptr
+        data["_per_alpha"] = getattr(buffer, 'alpha', 0.6)
+        data["_per_epsilon"] = getattr(buffer, 'epsilon', 1e-6)
+
+    return data
+
 
 def _deserialize_buffer(buffer_data):
-    """Restore replay buffer from serialized dict → deque of namedtuples."""
+    """Restore replay buffer from serialized dict → PrioritizedReplayBuffer."""
     if buffer_data is None:
         return None
-    from .ddqn import experienceReplayBuffer
+    from .ddqn import PrioritizedReplayBuffer
 
-    buf = experienceReplayBuffer(memory_size=1, burn_in=1)  # dummy, will be rebuilt
     n = len(buffer_data["actions"])
-    entries = []
-    for i in range(n):
-        entries.append(
-            buf.Buffer(
-                state=buffer_data["states"][i],
-                action=int(buffer_data["actions"][i]),
-                reward=float(buffer_data["rewards"][i]),
-                done=bool(buffer_data["dones"][i]),
-                next_state=buffer_data["next_states"][i],
-                mask=buffer_data["masks"][i],
-                next_mask=buffer_data["next_masks"][i],
-            )
-        )
-    # Create a proper buffer with the right size
     memory_size = max(n, 100000)
-    from collections import deque
-    buf.memory_size = memory_size
-    buf.replay_memory = deque(entries, maxlen=memory_size)
+    alpha = float(buffer_data.get("_per_alpha", 0.6))
+    epsilon = float(buffer_data.get("_per_epsilon", 1e-6))
+
+    buf = PrioritizedReplayBuffer(
+        memory_size=memory_size, burn_in=1,
+        alpha=alpha, epsilon=epsilon,
+    )
+
+    # Replay transitions in order
+    for i in range(n):
+        buf.replay_memory[i] = buf.Buffer(
+            state=buffer_data["states"][i],
+            action=int(buffer_data["actions"][i]),
+            reward=float(buffer_data["rewards"][i]),
+            done=bool(buffer_data["dones"][i]),
+            next_state=buffer_data["next_states"][i],
+            mask=buffer_data["masks"][i],
+            next_mask=buffer_data["next_masks"][i],
+        )
+
+    # Restore SumTree if present
+    if "_per_tree" in buffer_data:
+        saved_tree = buffer_data["_per_tree"]
+        if len(saved_tree) == len(buf.sum_tree.tree):
+            buf.sum_tree.tree = saved_tree.copy()
+        buf._write_ptr = int(buffer_data.get("_per_ptr", n % memory_size))
+        buf.sum_tree._ptr = buf._write_ptr
+        buf.sum_tree.n_entries = n
+
     return buf
 
 
@@ -107,14 +136,16 @@ def save_checkpoint(args, payload=None, run_paths=None, **_kwargs):
             "buffer_data": _serialize_buffer(extra.get("buffer")),
             "episode_count": extra.get("episode_count", 0),
             "transition_count": extra.get("transition_count", 0),
+            "per_alpha": extra.get("per_alpha", 0.6),
+            "per_beta_start": extra.get("per_beta_start", 0.4),
         }
         os.makedirs(os.path.dirname(paths.cached_path) or ".", exist_ok=True)
         torch.save(full_state, paths.cached_path)
         print(f"\n[DDQN] 完整状态已保存: {paths.cached_path}")
         if extra.get("optimizer_state_dict"):
             print(f"  optimizer  : ✓")
-        if extra.get("buffer") and len(extra["buffer"].replay_memory) > 0:
-            print(f"  buffer     : {len(extra['buffer'].replay_memory)} entries")
+        if extra.get("buffer") and len(extra["buffer"]) > 0:
+            print(f"  buffer     : {len(extra['buffer'])} entries")
         print(f"  episode    : {extra.get('episode_count', 0)}")
     else:
         # ── weights-only fallback (legacy / tagged) ──
@@ -158,6 +189,8 @@ def load_full_state(load_path, device="cpu"):
             extra["buffer_data"] = checkpoint["buffer_data"]
         extra["episode_count"] = checkpoint.get("episode_count", 0)
         extra["transition_count"] = checkpoint.get("transition_count", 0)
+        extra["per_alpha"] = checkpoint.get("per_alpha", 0.6)
+        extra["per_beta_start"] = checkpoint.get("per_beta_start", 0.4)
         return checkpoint["model_state_dict"], extra
     else:
         # Legacy weights-only format

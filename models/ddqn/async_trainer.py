@@ -6,7 +6,7 @@ import numpy as np
 from training.metrics import load_metric_events, load_training_snapshot
 from utils.train_utils import get_current_stage_name, load_training_config
 
-from .ddqn import experienceReplayBuffer
+from .ddqn import PrioritizedReplayBuffer
 from .learner import DDQNLearner
 from .monitoring import (
     DDQNConsoleReporter,
@@ -38,8 +38,16 @@ class AsyncDDQNTrainer:
             batch_size=args.ddqn_batch_size,
             gamma=args.ddqn_gamma,
         )
-        self.buffer = experienceReplayBuffer(
-            memory_size=args.ddqn_buffer_size, burn_in=args.ddqn_burn_in
+        # PER hyper-params (can be overridden via CLI / config in the future)
+        self._per_alpha = float(getattr(args, "ddqn_per_alpha", 0.6))
+        self._per_beta_start = float(getattr(args, "ddqn_per_beta", 0.4))
+        self._per_epsilon = float(getattr(args, "ddqn_per_epsilon", 1e-6))
+
+        self.buffer = PrioritizedReplayBuffer(
+            memory_size=args.ddqn_buffer_size,
+            burn_in=args.ddqn_burn_in,
+            alpha=self._per_alpha,
+            epsilon=self._per_epsilon,
         )
         self.batch_size = args.ddqn_batch_size
         self.reward_threshold = 30000
@@ -63,6 +71,12 @@ class AsyncDDQNTrainer:
 
         # ── Restore optimizer state, replay buffer & episode count from checkpoint ──
         if restored_extra is not None:
+            # PER hyper-params (restore before buffer so they match)
+            if restored_extra.get("per_alpha"):
+                self._per_alpha = float(restored_extra["per_alpha"])
+            if restored_extra.get("per_beta_start"):
+                self._per_beta_start = float(restored_extra["per_beta_start"])
+
             if restored_extra.get("optimizer_state_dict"):
                 self.learner.network.optimizer.load_state_dict(
                     restored_extra["optimizer_state_dict"]
@@ -79,7 +93,7 @@ class AsyncDDQNTrainer:
                 self.buffer.burn_in = self.args.ddqn_burn_in
                 print(
                     f"[DDQN] replay buffer 已恢复: "
-                    f"{len(self.buffer.replay_memory)} entries",
+                    f"{len(self.buffer)} entries",
                     flush=True,
                 )
             if restored_extra.get("episode_count", 0) > self.stats.episode_count:
@@ -186,8 +200,15 @@ class AsyncDDQNTrainer:
                     continue
 
                 if self.transition_count % network_update_frequency == 0:
-                    loss_value = self.learner.update(self.buffer)
-                    if loss_value is not None:
+                    # PER beta: linear anneal from beta_start → 1.0
+                    beta = self._per_beta_start + (
+                        1.0 - self._per_beta_start
+                    ) * min(1.0, self.stats.episode_count / max(1, max_episodes))
+
+                    result = self.learner.update(self.buffer, beta=beta)
+                    if result is not None:
+                        loss_value, tree_indices, td_errors = result
+                        self.buffer.update_priorities(tree_indices, td_errors)
                         self.stats.record_loss(loss_value)
                         self.metric_emitter.emit_loss(
                             loss_value=loss_value,
@@ -252,6 +273,8 @@ class AsyncDDQNTrainer:
                         "buffer": self.buffer,
                         "episode_count": self.stats.episode_count,
                         "transition_count": self.transition_count,
+                        "per_alpha": self._per_alpha,
+                        "per_beta_start": self._per_beta_start,
                     },
                 )
                 self.reporter.print_checkpoint(self.stats.episode_count)
@@ -276,7 +299,7 @@ class AsyncDDQNTrainer:
                         torch.cuda.empty_cache()
                     proc = psutil.Process(os.getpid())
                     mem_mb = proc.memory_info().rss / 1024 / 1024
-                    buf_pct = len(self.buffer.replay_memory) / max(1, self.buffer.memory_size) * 100
+                    buf_pct = len(self.buffer) / max(1, self.buffer.memory_size) * 100
                     qsize = worker_pool.transition_queue.qsize()
                     print(f"\n[MEM] main PID={os.getpid()} RSS={mem_mb:.0f}MB  "
                           f"buffer={buf_pct:.0f}%  queue={qsize}  "
