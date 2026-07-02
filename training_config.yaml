@@ -6,7 +6,7 @@
 # and differ only in network architecture.
 #
 # Usage:
-#   .\.venv\Scripts\python.exe train.py --training_config training_config_baseline.yaml
+#   .\.venv\Scripts\python.exe train.py --training_config training_config.yaml
 
 # =============================================================================
 # Game Settings — Survival: Day  (same as baseline)
