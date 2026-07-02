@@ -220,7 +220,8 @@ class PrioritizedReplayBuffer:
     # ── update ────────────────────────────────────────────────────────
     def update_priorities(self, tree_indices, td_errors):
         """Set new priorities from (absolute) TD-errors."""
-        for idx, td_err in zip(tree_indices, td_errors):
+        flat_errors = np.asarray(td_errors, dtype=np.float64).reshape(-1)
+        for idx, td_err in zip(tree_indices, flat_errors):
             priority = float(abs(td_err)) + self.epsilon
             self.sum_tree.update(int(idx), priority ** self.alpha)
 
