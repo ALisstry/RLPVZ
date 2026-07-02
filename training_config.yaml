@@ -158,31 +158,31 @@ observation_space:
 rewards:
   # 正向奖励 - 先保证局部行为有反馈，再让过波/通关成为主目标
   zombie_kill:
-    use_type_rewards: false     # false 时所有僵尸击杀都使用 default
-    default: 0.30
-    zombie: 0.30
-    flag: 0.30
-    conehead: 0.45
-    polevaulter: 0.50
-    buckethead: 0.70
-    newspaper: 0.40
-    screendoor: 0.60
-    football: 0.80
-    dancing: 0.50
-    backup: 0.30
-    duckytube: 0.30
-    snorkel: 0.45
-    bobsled: 0.45
-    dolphin: 0.55
-    jackinbox: 0.55
-    pogo: 0.55
-    yeti: 0.80
-    catapult: 0.75
-    imp: 0.30
+    use_type_rewards: true      # true 时按僵尸类型给击杀奖励
+    default: 8.00
+    zombie: 8.00
+    flag: 12.00
+    conehead: 12.00
+    polevaulter: 12.00
+    buckethead: 20.00
+    newspaper: 10.00
+    screendoor: 20.00
+    football: 24.00
+    dancing: 12.00
+    backup: 8.00
+    duckytube: 8.00
+    snorkel: 12.00
+    bobsled: 12.00
+    dolphin: 12.00
+    jackinbox: 12.00
+    pogo: 12.00
+    yeti: 20.00
+    catapult: 16.00
+    imp: 8.00
 
-  sun_collect: 0.01             # 收集阳光，给经济一点正反馈
-  wave_complete: 4.0            # 完成一波，是最稳定的阶段性奖励
-  game_win: 18.0                # 通关奖励，明显高于单次行为奖励
+  sun_collect: 0.0              # 关闭阳光奖励，避免经济 shaping 干扰主目标
+  wave_complete: 4.0            # 完成一波，是最稳定的阶段性奖励。注意这里算上了小波
+  game_win: 50.0                # 通关奖励，明显高于单次行为奖励
   streak_bonus: 0.0             # 禁用跨 episode 连胜奖励，避免 DDQN 目标非平稳
   survival_per_step: 0.0        # 不给纯苟活奖励
 
@@ -190,15 +190,15 @@ rewards:
   plant_sunflower: 0.10
   plant_attacker: 0.35
   plant_wall: 0.18
-  plant_lilypad: 0.4
-  plant_pumpkin: 0.1
-  plant_other: 0.3
+  plant_lilypad: 0.10
+  plant_pumpkin: 0.18
+  plant_other: 0.30
 
   # 负向惩罚 - 失败要疼，但不能大到淹没全过程信号
   plant_lost: -0.25
   sunflower_lost: -0.80
   lawnmower_triggered: -50.0
-  game_lose: -12.0
+  game_lose: -6.0
   invalid_action: -0.01
   wait_with_sun: -0.02        # 阳光充足时等待，弱惩罚纯等待
 
@@ -349,7 +349,7 @@ training:
   args:
     algo: "ddqn"                # 默认算法: ppo 或 ddqn
     port: 12345
-    num_envs: 2
+    num_envs: 8
     base_port: 12345
     ports: ""
     pids: ""
@@ -363,6 +363,15 @@ training:
     file_log_level: 1
     execution: "auto"
     curriculum: "stage_gate"
+
+  eval:
+    enabled: true
+    freq_episodes: 500
+    episodes: 20
+    deterministic: true
+    save_episode_details: true
+    real_num_envs: 1
+    real_base_port: 13000
   
   ppo:
     timesteps: 500000
@@ -394,8 +403,6 @@ training:
     ddqn_lr: 0.001
     ddqn_update_freq: 32
     ddqn_sync_freq: 2000
-    ddqn_eval_freq: 20
-    ddqn_eval_iters: 5
     ddqn_checkpoint_freq: 500
     ddqn_plot_freq: 20
     ddqn_plot_path: null

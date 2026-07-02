@@ -9,6 +9,7 @@ Key features:
 
 import gc
 import os
+from datetime import datetime
 import numpy as np
 import torch
 import torch.nn as nn
@@ -246,7 +247,7 @@ def train_ppo(
     max_grad_norm=0.5,
     lr=3e-4,
     network_type="cnn",
-    save_path="saved/sim_ppo.pt",
+    save_path=None,
     eval_episodes=100,
 ):
     """Train a maskable PPO agent on SimPVZ.
@@ -280,6 +281,9 @@ def train_ppo(
     save_path : str
         Path to save the trained model.
     """
+    if save_path is None:
+        save_path = _default_save_path("ppo", "sim_ppo.pt")
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     env = SimPVZEnv()
     network = PPONetwork(env, network_type=network_type, device=device)
@@ -446,6 +450,11 @@ def train_ppo(
 
     # Visualize
     _visualize_ppo_episode(env, network)
+
+
+def _default_save_path(algo, filename):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join("saved", algo, timestamp, filename)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

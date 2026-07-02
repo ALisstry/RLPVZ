@@ -232,8 +232,6 @@ training:
     ddqn_lr: 0.001              # paper spec
     ddqn_update_freq: 32
     ddqn_sync_freq: 2000        # paper spec: target sync every 2000 steps
-    ddqn_eval_freq: 100         # evaluate every 100 episodes
-    ddqn_eval_iters: 5
     ddqn_checkpoint_freq: 500
     ddqn_plot_freq: 50
     ddqn_plot_path: null

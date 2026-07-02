@@ -38,7 +38,27 @@ def build_specs(args: Any) -> tuple[EnvSpec, ScenarioSpec]:
     curriculum_name = getattr(args, "curriculum", "none")
     base_scenario, stage_scenarios = build_scenario_specs(config, curriculum_name)
     all_scenarios = (base_scenario, *stage_scenarios)
+    env_spec = _build_env_spec(config, args, all_scenarios)
+    if curriculum_name == "stage_gate" and stage_scenarios:
+        scenario_spec = stage_scenarios[0]
+    else:
+        scenario_spec = base_scenario
+    return env_spec, scenario_spec
 
+
+def build_base_eval_specs(args: Any) -> tuple[EnvSpec, ScenarioSpec]:
+    config = load_training_config(getattr(args, "training_config", None))
+    curriculum_name = getattr(args, "curriculum", "none")
+    base_scenario, stage_scenarios = build_scenario_specs(config, curriculum_name)
+    all_scenarios = (base_scenario, *stage_scenarios)
+    return _build_env_spec(config, args, all_scenarios), base_scenario
+
+
+def _build_env_spec(
+    config: dict[str, Any],
+    args: Any,
+    all_scenarios: tuple[ScenarioSpec, ...],
+) -> EnvSpec:
     game_cfg = config.get("game", {})
     cards_cfg = config.get("cards", {})
     action_cfg = config.get("action_space", {})
@@ -59,7 +79,7 @@ def build_specs(args: Any) -> tuple[EnvSpec, ScenarioSpec]:
     card_attribute_shape = _parse_shape(
         obs_cfg.get("card_attributes", {}).get("shape"), (10, 7)
     )
-    cards = base_scenario.cards
+    cards = all_scenarios[0].cards
     plant_types = int(cards_cfg.get("slot_count", len(cards) or 10))
     action_structure = action_cfg.get("structure", {})
     plant_actions = plant_types * rows * cols
@@ -80,11 +100,7 @@ def build_specs(args: Any) -> tuple[EnvSpec, ScenarioSpec]:
         num_envs=max(1, int(getattr(args, "num_envs", 1))),
         base_port=int(getattr(args, "base_port", getattr(args, "port", 12345))),
     )
-    if curriculum_name == "stage_gate" and stage_scenarios:
-        scenario_spec = stage_scenarios[0]
-    else:
-        scenario_spec = base_scenario
-    return env_spec, scenario_spec
+    return env_spec
 
 
 def build_scenario_specs(

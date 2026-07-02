@@ -1,9 +1,20 @@
 from .checkpoint import CheckpointManager
 from .context import build_train_context
+from .evaluation import load_evaluation_config
+from .game_instances import (
+    prepare_eval_game_instances,
+    prepare_game_instances,
+    terminate_pvz_processes,
+)
 from .logging import setup_logging
 from .paths import build_run_paths
 from .game_instances import prepare_game_instances, terminate_pvz_processes
-from utils.train_utils import print_metadata, setup_device, write_run_metadata
+from utils.train_utils import (
+    load_training_config,
+    print_metadata,
+    setup_device,
+    write_run_metadata,
+)
 
 
 class TrainRunner:
@@ -24,12 +35,20 @@ class TrainRunner:
         game_instances = prepare_game_instances(self.args)
         if game_instances is None:
             return
+        eval_config = load_evaluation_config(
+            load_training_config(self.args.training_config)
+            .get("training", {})
+            .get("eval", {})
+        )
+        eval_game_instances = prepare_eval_game_instances(self.args, eval_config)
 
         context = build_train_context(
             args=self.args,
             algorithm=self.algorithm,
             device=device,
             game_instances=game_instances,
+            eval_game_instances=eval_game_instances,
+            eval_config=eval_config,
             checkpoint=checkpoint,
             run_paths=run_paths,
         )

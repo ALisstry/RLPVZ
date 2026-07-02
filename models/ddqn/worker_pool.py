@@ -92,7 +92,7 @@ class DDQNWorkerPool(AsyncWorkerPool):
             pass
 
 
-def _build_worker_env(args, instance, worker_id=None, env_spec=None, scenario_spec=None):
+def build_ddqn_env(args, instance, worker_id=None, env_spec=None, scenario_spec=None):
     from envs import PVZEnv
     from .adapter import DDQNEnvAdapter
 
@@ -109,6 +109,10 @@ def _build_worker_env(args, instance, worker_id=None, env_spec=None, scenario_sp
         worker_id=worker_id,
     )
     return DDQNEnvAdapter(env, env_spec=env_spec, scenario_spec=scenario_spec)
+
+
+def _build_worker_env(args, instance, worker_id=None, env_spec=None, scenario_spec=None):
+    return build_ddqn_env(args, instance, worker_id, env_spec, scenario_spec)
 
 
 def _drain_latest_weights(weights_queue):

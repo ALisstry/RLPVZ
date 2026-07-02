@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+from copy import copy
 
 import psutil
 
@@ -55,6 +56,23 @@ def prepare_game_instances(args):
         )
     )
     return instances
+
+
+def prepare_eval_game_instances(args, eval_config):
+    if not getattr(eval_config, "enabled", False):
+        return []
+    eval_args = copy(args)
+    eval_args.num_envs = max(1, int(getattr(eval_config, "real_num_envs", 1)))
+    if getattr(eval_config, "real_base_port", None) is not None:
+        eval_args.base_port = int(eval_config.real_base_port)
+        eval_args.port = int(eval_config.real_base_port)
+        eval_args.ports = ""
+    print(
+        "[Eval] 准备 real eval 实例: "
+        f"num_envs={eval_args.num_envs}, "
+        f"base_port={getattr(eval_args, 'base_port', getattr(eval_args, 'port', None))}"
+    )
+    return prepare_game_instances(eval_args) or []
 
 
 def _launch_game_and_inject(

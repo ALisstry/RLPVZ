@@ -94,6 +94,53 @@ def _print_network_summary(network, use_paper, hidden_sizes, device):
     print()
 
 
+def _print_network_summary(network, use_paper, hidden_sizes, device):
+    """Print PyTorch network structure and parameter count."""
+    n_outputs = network.n_outputs
+    total_params = sum(p.numel() for p in network.parameters())
+    trainable_params = sum(p.numel() for p in network.parameters() if p.requires_grad)
+
+    is_cnn = hasattr(network, '_n_grid_channels')
+    is_factored = getattr(network, '_use_factored', False)
+
+    print(f"\n{'='*60}")
+    print(f"  DDQN Network Summary{' (CNN)' if is_cnn else ''}{' (Factored)' if is_factored else ''}")
+    print(f"{'='*60}")
+    print(f"  Device:        {device}")
+    print(f"  Observation:   596 dim {'(paper format)' if use_paper else ''}")
+    print(f"  Actions:       {n_outputs}")
+    if is_factored:
+        print(f"  Action heads:  wait(1) + pos(45) + card(10) = 56 → outer-sum → 451")
+    if is_cnn:
+        print(f"  Architecture:  3x3-CNN + 1x9-CNN | global-MLP -> {'factored heads' if is_factored else 'head'}")
+    else:
+        hidden_str = " -> ".join(str(h) for h in (hidden_sizes or [256, 128]))
+        print(f"  Hidden layers: {hidden_str}")
+        print(f"  Activation:    LeakyReLU")
+        print(f"  Architecture:  596 -> {hidden_str} -> {n_outputs}")
+    print(f"{'='*60}")
+    print(f"  Total params:  {total_params:,}")
+    print(f"  Trainable:     {trainable_params:,}")
+    print(f"{'='*60}")
+
+    # Per-layer details
+    print(f"\n  Layer details:")
+    print(f"  {'Layer':<25} {'Shape':<30} {'Params':>12}")
+    print(f"  {'-'*67}")
+    for name, module in network.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            w = module.weight
+            bias = module.bias.numel() if module.bias is not None else 0
+            print(f"  {name:<25} [{'x'.join(str(d) for d in w.shape)}]{' +b' if bias else '':<20} {w.numel() + bias:>12,}")
+        elif isinstance(module, torch.nn.Conv2d):
+            w = module.weight
+            bias = module.bias.numel() if module.bias is not None else 0
+            print(f"  {name:<25} {'Conv'+str(tuple(w.shape)):<30} {w.numel() + bias:>12,}")
+        elif isinstance(module, (torch.nn.BatchNorm2d, torch.nn.ReLU, torch.nn.Dropout, torch.nn.LeakyReLU)):
+            pass  # skip activation/norm layers
+    print()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # DDQN Algorithm
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -180,13 +227,24 @@ class DDQNAlgorithm:
                 use_factored=use_factored,
             )
         else:
-            network = QNetwork(
+            use_cnn = getattr(context.args, "use_cnn", False)
+        if use_cnn:
+            from .cnn_network import CNNQNetwork
+            use_factored = getattr(context.args, "use_factored", False)
+            network = CNNQNetwork(
                 env,
                 learning_rate=context.args.ddqn_lr,
                 device=device,
-                hidden_sizes=hidden_sizes,
-                n_inputs_override=n_inputs_override,
+                use_factored=use_factored,
             )
+        else:
+            network = QNetwork(
+                    env,
+                    learning_rate=context.args.ddqn_lr,
+                    device=device,
+                    hidden_sizes=hidden_sizes,
+                    n_inputs_override=n_inputs_override,
+                )
         context.artifacts.network = network
 
         load_path = context.checkpoint.resolve_load_path()
@@ -207,7 +265,19 @@ class DDQNAlgorithm:
             else:
                 print("[DDQN] 旧版 checkpoint (仅权重)，optimizer/buffer 从零开始")
 
-        _print_network_summary(network, use_paper_obs, hidden_sizes, device)
+            _print_network_summary(network, use_paper_obs, hidden_sizes, device)
+            if restored_extra is not None:
+                print(
+                    "[DDQN] 完整状态恢复: "
+                    f"optimizer={'✓' if restored_extra.get('optimizer_state_dict') else '✗'}, "
+                    f"buffer={'✓' if restored_extra.get('buffer_data') else '✗'}, "
+                    f"ep={restored_extra.get('episode_count', 0)}",
+                    flush=True,
+                )
+            else:
+                print("[DDQN] 旧版 checkpoint (仅权重)，optimizer/buffer 从零开始")
+
+        _print_network_summary(network, hidden_sizes, device)
 
         trainer = AsyncDDQNTrainer(
             context.args,
@@ -225,8 +295,6 @@ class DDQNAlgorithm:
             max_episodes=context.args.ddqn_episodes,
             network_update_frequency=context.args.ddqn_update_freq,
             network_sync_frequency=context.args.ddqn_sync_freq,
-            evaluate_frequency=context.args.ddqn_eval_freq,
-            evaluate_n_iter=context.args.ddqn_eval_iters,
         )
 
 

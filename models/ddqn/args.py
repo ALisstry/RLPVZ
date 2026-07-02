@@ -32,18 +32,6 @@ def add_args(group):
         help="DDQN target sync frequency",
     )
     group.add_argument(
-        "--ddqn_eval_freq",
-        type=int,
-        default=argparse.SUPPRESS,
-        help="DDQN evaluation frequency (episodes)",
-    )
-    group.add_argument(
-        "--ddqn_eval_iters",
-        type=int,
-        default=argparse.SUPPRESS,
-        help="DDQN evaluation iterations",
-    )
-    group.add_argument(
         "--ddqn_checkpoint_freq",
         type=int,
         default=argparse.SUPPRESS,

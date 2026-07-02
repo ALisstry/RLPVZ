@@ -3,8 +3,8 @@ from ... import config
 
 
 class Zombie(Entity):
-    MAX_HP = 190
-    WALKING_SPEED = 5
+    MAX_HP = 270
+    WALKING_SPEED = 80 / 23
     ATTACK_SPEED = 100
     SCORE = 120
 
@@ -14,9 +14,18 @@ class Zombie(Entity):
         self._attack = self.ATTACK_SPEED // config.FPS
         self._cell_length = self.WALKING_SPEED * config.FPS
         self._offset = self._cell_length - 1
+        self._slow_timer = 0
+        self._stun_timer = 0
 
     def step(self, scene):
-        if scene.grid.is_empty(self.lane, self.pos):
+        if self._stun_timer > 0:
+            self._stun_timer -= 1
+            return
+
+        if not scene.grid.is_blocked(self.lane, self.pos):
+            movement = 0.5 if self._slow_timer > 0 else 1.0
+            if self._slow_timer > 0:
+                self._slow_timer -= 1
             if self._offset <= 0:
                 self.pos -= 1
                 self._offset = self._cell_length - 1
@@ -24,15 +33,23 @@ class Zombie(Entity):
                     scene.zombie_reach(self.lane)
                     self.hp = 0
             else:
-                self._offset -= 1
+                self._offset -= movement
         else:
             for plant in scene.plants:
-                if plant.lane == self.lane and plant.pos == self.pos:
+                if (plant.lane == self.lane
+                        and plant.pos == self.pos
+                        and getattr(plant, "BLOCKS_ZOMBIE", True)):
                     self.attack(plant)
                     break
 
     def attack(self, plant):
         plant.hp -= self._attack
+
+    def slow(self, duration):
+        self._slow_timer = max(self._slow_timer, int(duration))
+
+    def stun(self, duration):
+        self._stun_timer = max(self._stun_timer, int(duration))
 
     def get_offset(self):
         return self._offset / self._cell_length

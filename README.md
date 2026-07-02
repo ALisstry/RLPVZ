@@ -84,7 +84,7 @@ DDQN 多进程示例（自动启动 4 个游戏进程并注入 DLL，端口 1234
 
 - **零依赖启动**：无需安装游戏、无需注入 DLL、无需配置进程 PID
 - **高速运行**：无 gym wrapper 校验开销，无渲染数据采集，每步仅做游戏帧计算
-- **与真实环境一致的博弈规则**：相同的植物/僵尸/飞行物行为、相同的波次递增难度、相同的动作空间和奖励结构
+- **面向 DDQN 预训练**：动作索引、typed one-hot state 和网络 shape 对齐 `training_config.yaml` 默认真实 DDQN
 - **兼容 DDQN 训练接口**：`reset()` → 状态向量，`step()` → (state, reward, done, info)，`mask_available_actions()` → 动作掩码
 
 ### 快速开始
@@ -93,17 +93,17 @@ DDQN 多进程示例（自动启动 4 个游戏进程并注入 DLL，端口 1234
 .\.venv\Scripts\python.exe train_sim.py
 ```
 
-训练脚本默认参数：5 万 episode、batch size 200、buffer 容量 10 万。模型和训练曲线保存在 `saved/` 目录。
+训练脚本默认参数：10 万 episode、batch size 200、buffer 容量 5 万。模型和训练曲线保存在 `saved/` 目录。
 
 ### 仿真环境参数
 
 | 参数 | 值 | 说明 |
 |---|---|---|
 | 网格 | 5×9 | 行×列 |
-| 植物 | 向日葵/豌豆射手/坚果墙/土豆雷 | 4 种 |
+| 植物 | `training_config.yaml` 默认 10 卡 | 向日葵/豌豆/寒冰/双发/坚果/窝瓜/樱桃/地刺/玉米/西瓜 |
 | 僵尸 | 普通/路障/铁桶/旗帜 | 4 种，含护甲蜕变机制 |
-| 动作空间 | 181 (4×5×9 + 1) | Discrete |
-| 观测维度 | 95 | `[plant_grid(45), zombie_hp(45), plant_avail(4), sun_norm(1)]` |
+| 动作空间 | 451 (10×5×9 + 1) | wait action 为 450 |
+| 观测维度 | 596 | `[sun, card_cooldowns, plant_type_onehot, plant_hp, zombie_hp]` |
 | 生成器 | WaveZombieSpawner | 波次递增难度 |
 | 最大帧数 | 400 | 单局上限 |
 
@@ -113,9 +113,9 @@ DDQN 多进程示例（自动启动 4 个游戏进程并注入 DLL，端口 1234
 |---|---|---|
 | 启动速度 | 需启动游戏 × N 个实例 | 瞬间 |
 | 网格 | 5×9（baseline） | 5×9 |
-| 植物数 | 10 种 | 4 种 |
-| 观测维度 | 596（paper format）| 95 |
-| 动作数 | 451 | 181 |
+| 植物数 | 10 种 | 10 种 |
+| 观测维度 | 596（typed one-hot）| 596 |
+| 动作数 | 451 | 451 |
 | 并行 | 多进程（每 worker 一个游戏） | 单进程 |
 | 适用场景 | 最终训练、评估 | 快速实验、超参调试 |
 
@@ -125,9 +125,15 @@ DDQN 多进程示例（自动启动 4 个游戏进程并注入 DLL，端口 1234
 from simenv import SimPVZEnv
 
 env = SimPVZEnv()
-state = env.reset()          # float32[95]
-mask  = env.mask_available_actions()  # bool[181]
+state = env.reset()          # float32[596]
+mask  = env.mask_available_actions()  # bool[451]
 next_state, reward, done, info = env.step(action)
+```
+
+Sim DDQN 输出的 `saved/sim_ddqn.pt` 是 state dict，可作为真实 DDQN 的 `ddqn_load_path` 使用：
+
+```powershell
+.\.venv\Scripts\python.exe train.py --algo ddqn --ddqn_load_path saved\sim_ddqn.pt
 ```
 
 ## 配置
@@ -177,7 +183,6 @@ DDQN 特有参数：
 | `--ddqn_sync_freq` | 2000 | Target 网络同步频率 |
 | `--ddqn_hidden_sizes` | 256,128 | 隐层大小（逗号分隔，baseline 为 2048,2048） |
 | `--ddqn_checkpoint_freq` | 500 | Checkpoint 保存频率（episode） |
-| `--ddqn_eval_freq` | 100 | 评估频率（episode） |
 
 ## 输出文件
 

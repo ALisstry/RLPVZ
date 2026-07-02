@@ -16,8 +16,13 @@ class Move:
                 and scene.sun >= scene.plant_deck[self.plant_name].COST)
 
     def apply_move(self, scene):
-        scene.plants.append(scene.plant_deck[self.plant_name](self.lane, self.pos))
-        scene.grid.add_obj(self.lane, self.pos)
+        plant = scene.plant_deck[self.plant_name](self.lane, self.pos)
+        scene.plants.append(plant)
+        scene.grid.add_obj(
+            self.lane,
+            self.pos,
+            blocks=getattr(plant, "BLOCKS_ZOMBIE", True),
+        )
         scene.plant_cooldowns[self.plant_name] = (
             scene.plant_deck[self.plant_name].COOLDOWN * config.FPS - 1)
         scene.sun -= scene.plant_deck[self.plant_name].COST

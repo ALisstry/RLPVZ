@@ -162,7 +162,8 @@ def main():
     print(f"  Episodes per agent: {args.episodes}")
     print(f"  Grid: {config.N_LANES}×{config.LANE_LENGTH}  "
           f"Max frames: {config.MAX_FRAMES} ({config.MAX_FRAMES / config.FPS}s)")
-    print(f"  Plants: sunflower, peashooter, wall-nut, potatomine")
+    print("  Plants: sunflower, peashooter, snow-pea, repeater, wall-nut, "
+          "squash, cherry-bomb, spikeweed, kernel-pult, melon-pult")
     print("=" * 62)
 
     all_results = []

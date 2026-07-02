@@ -22,13 +22,22 @@ except Exception:
 COLORS = {
     "Sunflower": "#FFD700",
     "Peashooter": "#228B22",
+    "SnowPea": "#7EC8E3",
+    "Repeater": "#006400",
     "Wallnut": "#8B4513",
     "Potatomine": "#FF4444",
+    "Squash": "#7CFC00",
+    "CherryBomb": "#DC143C",
+    "Spikeweed": "#556B2F",
+    "KernelPult": "#DAA520",
+    "MelonPult": "#2E8B57",
     "Zombie": "#808080",
     "Zombie_cone": "#FF8C00",
     "Zombie_bucket": "#C0C0C0",
     "Zombie_flag": "#FF6347",
     "Pea": "#32CD32",
+    "Kernel": "#F0E68C",
+    "Melon": "#3CB371",
     "Mower": "#FF0000",
     "background": "#90C850",
     "grid_line": "#6B8E23",
@@ -39,8 +48,15 @@ COLORS = {
 NAMES_CN = {
     "Sunflower": "Sunflower",
     "Peashooter": "Peashooter",
+    "SnowPea": "Snow Pea",
+    "Repeater": "Repeater",
     "Wallnut": "Wall-nut",
     "Potatomine": "Mine",
+    "Squash": "Squash",
+    "CherryBomb": "Cherry",
+    "Spikeweed": "Spike",
+    "KernelPult": "Kernel",
+    "MelonPult": "Melon",
     "Zombie": "Zombie",
     "Zombie_cone": "Cone Zombie",
     "Zombie_bucket": "Bucket Zombie",
@@ -128,8 +144,11 @@ def replay_episode(render_data, fps=10, save_path=None, title="SimPVZ Episode Re
                 ax_grid.add_patch(p)
                 plant_patches.append(p)
                 # Health bar
-                max_hp = {"Sunflower": 300, "Peashooter": 300, "Wallnut": 4000,
-                          "Potatomine": 300}.get(name, 300)
+                max_hp = {"Sunflower": 300, "Peashooter": 300, "SnowPea": 300,
+                          "Repeater": 300, "Wallnut": 4000,
+                          "Potatomine": 300, "Squash": 300,
+                          "CherryBomb": 300, "Spikeweed": 300,
+                          "KernelPult": 300, "MelonPult": 300}.get(name, 300)
                 hp_ratio = max(0, hp / max_hp)
                 if hp_ratio < 0.99:
                     ax_grid.add_patch(Rectangle(
@@ -179,7 +198,11 @@ def replay_episode(render_data, fps=10, save_path=None, title="SimPVZ Episode Re
             "",
             "Cooldowns (s):",
         ]
-        cd_map = {"sunflower": "SF", "peashooter": "Pea", "wall-nut": "Wall", "potatomine": "Mine"}
+        cd_map = {"sunflower": "SF", "peashooter": "Pea", "snow-pea": "Snow",
+                  "repeater": "Rep", "wall-nut": "Wall", "squash": "Squ",
+                  "cherry-bomb": "Chry", "spikeweed": "Spike",
+                  "kernel-pult": "Kern", "melon-pult": "Melon",
+                  "potatomine": "Mine"}
         cooldowns = frame_data.get("cooldowns", {})
         for name, cd in cooldowns.items():
             abbr = cd_map.get(name, name[:4])

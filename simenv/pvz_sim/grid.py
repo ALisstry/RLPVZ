@@ -5,17 +5,23 @@ import numpy as np
 class Grid:
     def __init__(self):
         self._grid = np.zeros((config.N_LANES, config.LANE_LENGTH), dtype=bool)
+        self._blocking_grid = np.zeros((config.N_LANES, config.LANE_LENGTH), dtype=bool)
         self._lanes = np.zeros(config.N_LANES, dtype=int)
         self._mowers = np.full(config.N_LANES, config.MOWERS, dtype=bool)
 
-    def add_obj(self, lane, pos):
+    def add_obj(self, lane, pos, blocks=True):
         self._grid[lane, pos] = True
+        self._blocking_grid[lane, pos] = bool(blocks)
 
     def remove_obj(self, lane, pos):
         self._grid[lane, pos] = False
+        self._blocking_grid[lane, pos] = False
 
     def is_empty(self, lane, pos):
         return not self._grid[lane, pos]
+
+    def is_blocked(self, lane, pos):
+        return self._blocking_grid[lane, pos]
 
     def is_full(self):
         return not bool(len(np.nonzero(np.logical_not(self._grid))[0]))

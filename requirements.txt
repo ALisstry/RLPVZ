@@ -12,6 +12,7 @@ psutil>=5.9.0
 pyyaml>=6.0.1
 requests>=2.31.0
 matplotlib>=3.8.0
+pygame>=2.5.0
 
 # 辅助工具 (可选)
 tqdm>=4.65.0

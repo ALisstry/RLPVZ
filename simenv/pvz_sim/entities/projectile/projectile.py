@@ -46,7 +46,7 @@ class Projectile(Entity):
                 return True
         return False
 
-    def _attack_zombies(self, zombies):
+    def _attack_zombies(self, zombies, scene=None):
         pass
 
     def step(self, scene):
@@ -56,7 +56,7 @@ class Projectile(Entity):
             if self._hit(zombie):
                 zombies_hit.append(zombie)
         if zombies_hit:
-            self._attack_zombies(zombies_hit)
+            self._attack_zombies(zombies_hit, scene)
         if self._is_out():
             self.hp = 0
 

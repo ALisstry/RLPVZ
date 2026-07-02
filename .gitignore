@@ -16,6 +16,7 @@ crash.txt
 heatmap.html
 models_output/*
 saved/
+eval_output/
 
 # OS
 .DS_Store

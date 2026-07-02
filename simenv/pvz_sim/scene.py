@@ -18,6 +18,8 @@ class Scene:
         self._chrono = 0
         self.score = 0
         self.lives = 1
+        self.killed_zombies = []
+        self.escaped_zombies = []
 
     def step(self):
         for plant in self.plants:
@@ -64,7 +66,17 @@ class Scene:
                 alive_zombies.append(zombie)
             else:
                 self.grid.zombie_death(zombie.lane)
-                self.score += zombie.SCORE
+                zombie_info = {
+                    "name": zombie.__class__.__name__,
+                    "lane": zombie.lane,
+                    "pos": zombie.pos,
+                    "hp": zombie.hp,
+                }
+                if zombie.pos < 0:
+                    self.escaped_zombies.append(zombie_info)
+                else:
+                    self.killed_zombies.append(zombie_info)
+                    self.score += zombie.SCORE
         self.zombies = alive_zombies
 
         alive_projectiles = []

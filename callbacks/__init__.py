@@ -9,6 +9,7 @@ from .async_save import AsyncSingleModelCallback
 from .heatmap import HeatmapCallback
 from .ppo_curriculum import PPOCurriculumCallback
 from .ppo_metrics import PPOMetricsCallback
+from .strict_eval import StrictEvalCallback
 
 __all__ = [
     "DynamicEntropyCallback",
@@ -22,4 +23,5 @@ __all__ = [
     "HeatmapCallback",
     "PPOCurriculumCallback",
     "PPOMetricsCallback",
+    "StrictEvalCallback",
 ]

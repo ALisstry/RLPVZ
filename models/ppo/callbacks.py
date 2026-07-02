@@ -10,6 +10,7 @@ from callbacks import (
     PPOCurriculumCallback,
     PPOMetricsCallback,
     SimpleMonitorCallback,
+    StrictEvalCallback,
 )
 
 
@@ -37,6 +38,12 @@ def build_callbacks(args, run_paths, checkpoint=None, metrics=None, context=None
         callbacks.append(PPOMetricsCallback(metrics=metrics))
     if context is not None and getattr(args, "curriculum", "none") != "none":
         callbacks.append(PPOCurriculumCallback(context=context))
+    if (
+        context is not None
+        and context.eval_config.enabled
+        and context.eval_game_instances
+    ):
+        callbacks.append(StrictEvalCallback(context=context))
 
     callbacks.append(
         DynamicEntropyCallback(

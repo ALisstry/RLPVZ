@@ -6,7 +6,7 @@ class Pea(Projectile):
         super().__init__(speed, lane, pos)
         self._attack = attack
 
-    def _attack_zombies(self, zombies):
+    def _attack_zombies(self, zombies, scene=None):
         zombie_hit = min(zombies, key=lambda z: (z.pos, z._offset))
         zombie_hit.hp -= self._attack
         self.hp = 0

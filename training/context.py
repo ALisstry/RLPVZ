@@ -8,6 +8,7 @@ from utils.train_utils import get_current_stage_name, to_json_string
 from .checkpoint import CheckpointManager, CheckpointPayload
 from .curriculum import CurriculumStrategy, build_curriculum_strategy
 from .execution import ExecutionConfig, resolve_execution
+from .evaluation import EvaluationConfig, EvaluationWriter
 from .metrics import MetricEvent, MetricsPipeline, build_metrics_pipeline, load_metric_events
 from .paths import RunPaths
 from .specs import EnvSpec, ScenarioSpec, build_specs
@@ -40,6 +41,9 @@ class TrainContext:
     env_spec: EnvSpec
     scenario_spec: ScenarioSpec
     game_instances: list[dict]
+    eval_game_instances: list[dict]
+    eval_config: EvaluationConfig
+    evaluation_writer: EvaluationWriter
     curriculum: CurriculumStrategy
     metrics: MetricsPipeline
     checkpoint: CheckpointManager
@@ -76,7 +80,16 @@ class TrainContext:
         return changed, new_scenario
 
 
-def build_train_context(args, algorithm, device, game_instances, checkpoint, run_paths):
+def build_train_context(
+    args,
+    algorithm,
+    device,
+    game_instances,
+    eval_game_instances,
+    eval_config,
+    checkpoint,
+    run_paths,
+):
     execution = resolve_execution(args, algorithm.spec)
     env_spec, scenario_spec = build_specs(args)
     curriculum = build_curriculum_strategy(args, scenario_spec)
@@ -90,6 +103,12 @@ def build_train_context(args, algorithm, device, game_instances, checkpoint, run
         env_spec=env_spec,
         scenario_spec=scenario_spec,
         game_instances=game_instances,
+        eval_game_instances=eval_game_instances,
+        eval_config=eval_config,
+        evaluation_writer=EvaluationWriter(
+            run_paths.run_dir,
+            save_episode_details=eval_config.save_episode_details,
+        ),
         curriculum=curriculum,
         metrics=build_metrics_pipeline(args, run_paths),
         checkpoint=checkpoint,
