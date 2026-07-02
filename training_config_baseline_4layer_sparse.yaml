@@ -1,17 +1,13 @@
-# PVZ AI Debug Training Configuration
-# Based on baseline (paper spec), with zombie-damage reward for dense learning signal.
-#
-# Differences from baseline:
-#   - rewards.debug_mode: "zombie_damage"  (reward = zombie HP reduction per step)
-#   - frameskip: 49                        (1 step ≈ 1 sec game time)
-#   - ddqn_batch_size: 500                 (larger batch for stable gradients)
-#   - ddqn_buffer_size: 100000             (larger replay buffer)
+# PVZ AI Baseline Training Configuration — 4-Layer Variant
+# Survival Day — same paper spec, 4-layer MLP with ~half-width hidden layers
+# Param count: ~6.34M (matched to baseline [2048,2048]'s 6.34M)
+# Architecture: 596 → 1280 → 1280 → 1280 → 1280 → 451
 #
 # Usage:
-#   .\.venv\Scripts\python.exe train.py --training_config training_config_debug.yaml
+#   .\.venv\Scripts\python.exe train.py --training_config training_config_baseline_4layer.yaml
 
 # =============================================================================
-# Game Settings — Survival: Day  (same as baseline)
+# Game Settings — Survival: Day
 # =============================================================================
 game:
   mode: "survival_day"           # 生存模式(白天)
@@ -23,7 +19,7 @@ game:
   initial_sun: 50
 
 # =============================================================================
-# Card Loadout — exactly matching paper Table 4  (same as baseline)
+# Card Loadout — exactly matching paper Table 4
 # =============================================================================
 cards:
   slot_count: 10
@@ -90,7 +86,7 @@ cards:
       cost: 100
 
 # =============================================================================
-# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451  (same as baseline)
+# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451
 # =============================================================================
 action_space:
   type: "discrete"
@@ -102,7 +98,7 @@ action_space:
     wait_action: 1
 
 # =============================================================================
-# Observation Space — matches paper's 596-dim flat vector spec  (same as baseline)
+# Observation Space — matches paper's 596-dim flat vector spec
 # Grid channels: 13-channel grid (used by PPO / PVZEnv internally)
 # DDQN adapter will extract paper-format: plant one-hot + HP + zombie HP + sun + cooldown
 # =============================================================================
@@ -144,30 +140,28 @@ observation_space:
       - "zombie_refresh_hp"
       - "ice_trails"
       - "next_wave_preview"
-    total_dim: 65
+    total_dim: 65               # 5 + 1+1+1+1+1+1+1+1 + 5 + 10 + 10 + 5 + 5 + 1 + 1 + 5 + 10
 
   card_attributes:
     shape: [10, 7]
 
 # =============================================================================
-# Reward — sparse config matching baseline, with debug override
+# Reward — sparse zombie-kill-only rewards matching paper Table 5
+# All reward values are scaled down compared to original config for stability
 # =============================================================================
 rewards:
-  # ═══ Debug mode: reward = zombie total_hp reduction per step ═══
-  debug_mode: "zombie_damage"
-
-  # Below matches baseline exactly (ignored when debug_mode is active)
+  # Zombie kill rewards (sparse signal — matches paper Table 5)
   zombie_kill:
     use_type_rewards: true
-    default: 0.3
-    zombie: 0.2
+    default: 0.3                # Fallback for unlisted zombie types
+    zombie: 0.2                 # Basic Zombie
     flag: 0.2
-    conehead: 0.3
-    polevaulter: 0.5
-    buckethead: 0.6
+    conehead: 0.3               # Conehead Zombie
+    polevaulter: 0.5            # Pole Vaulter Zombie
+    buckethead: 0.6             # Buckethead Zombie
     newspaper: 0.3
     screendoor: 0.6
-    football: 0.8
+    football: 0.8               # Football Zombie
     dancing: 0.5
     backup: 0.2
     duckytube: 0.2
@@ -180,11 +174,13 @@ rewards:
     catapult: 0.7
     imp: 0.2
 
+  # Hardcoded reward components — explicitly zero for sparse baseline
   coverage:
-    scale: 0.0
+    scale: 0.0                   # row-coverage bonus
   proximity:
-    scale: 0.0
+    scale: 0.0                   # zombie-proximity penalty
 
+  # All auxiliary rewards set to 0 for clean sparse baseline
   sun_collect: 0.0
   wave_complete: 0.0
   game_win: 0.0
@@ -203,11 +199,12 @@ rewards:
   invalid_action: 0.0
   wait_with_sun: 0.0
 
+  # Potential-based shaping: disabled for clean baseline
   potential:
     delta_scale: 0.0
 
 # =============================================================================
-# Training Configuration  (same as baseline except batch/buffer/frameskip)
+# Training Configuration
 # =============================================================================
 training:
   args:
@@ -221,26 +218,26 @@ training:
     game_path: "gameobj/PlantsVsZombies.exe"
     wait_time: 3.0
     speed: 10.0
-    frameskip: 49               # DEBUG: 1 step ≈ 1 sec game time (baseline: 24)
+    frameskip: 24               # matches paper: ~4-5 decisions per in-game second
     auto_resume: true
     env_console_log_level: 0
     file_log_level: 1
     execution: "async_worker_pool"
     curriculum: "none"
 
-    # Paper observation format (one-hot + HP) — same as baseline
+    # Paper observation format (one-hot + HP)
     ddqn_paper_observation: true
 
   ddqn:
-    ddqn_episodes: 10000        # same as baseline
-    ddqn_gamma: 0.99            # same as baseline
-    ddqn_batch_size: 512        # DEBUG: larger batch (baseline: 32)
-    ddqn_buffer_size: 100000    # DEBUG: larger buffer (baseline: 50000)
-    ddqn_burn_in: 10000         # same as baseline
-    ddqn_lr: 0.001              # same as baseline
+    ddqn_episodes: 10000        # paper: 10,000 episodes
+    ddqn_gamma: 0.99            # paper spec
+    ddqn_batch_size: 32         # paper spec
+    ddqn_buffer_size: 50000     # paper spec
+    ddqn_burn_in: 10000         # paper spec
+    ddqn_lr: 0.001              # paper spec
     ddqn_update_freq: 32
-    ddqn_sync_freq: 2000        # same as baseline
-    ddqn_eval_freq: 100
+    ddqn_sync_freq: 2000        # paper spec: target sync every 2000 steps
+    ddqn_eval_freq: 100         # evaluate every 100 episodes
     ddqn_eval_iters: 5
     ddqn_checkpoint_freq: 500
     ddqn_plot_freq: 50
@@ -248,8 +245,8 @@ training:
     ddqn_save_path: null
     ddqn_load_path: null
 
-    # Paper network architecture: 2 hidden layers of 2048 each  (same as baseline)
-    ddqn_hidden_sizes: [2048, 2048]
+    # 4-layer MLP: each layer ~half width of baseline, total params matched
+    ddqn_hidden_sizes: [1280, 1280, 1280, 1280]
 
   env:
     max_steps: 10000
