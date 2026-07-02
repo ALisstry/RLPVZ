@@ -1,0 +1,258 @@
+# PVZ AI Debug Training Configuration — 4-Layer MLP
+# Based on baseline (paper spec), with zombie-damage reward for dense learning signal.
+# Deeper network: 2048→1024→512→256 (4 hidden layers).
+#
+# Differences from baseline:
+#   - rewards.debug_mode: "zombie_damage"  (reward = zombie HP reduction per step)
+#   - frameskip: 49                        (1 step ≈ 1 sec game time)
+#   - ddqn_batch_size: 500                 (larger batch for stable gradients)
+#   - ddqn_buffer_size: 100000             (larger replay buffer)
+#   - ddqn_hidden_sizes: [2048, 1024, 512, 256]  (4-layer deeper MLP)
+#
+# Usage:
+#   .\.venv\Scripts\python.exe train.py --training_config training_config_debug2.yaml
+
+# =============================================================================
+# Game Settings — Survival: Day  (same as baseline)
+# =============================================================================
+game:
+  mode: "survival_day"           # 生存模式(白天)
+  game_mode_id: 1                # GAMEMODE_SURVIVAL_NORMAL_STAGE_1 = 生存白天
+  background_type: 0             # BACKGROUND_DAY
+  map: "day"                     # 草地 (5 rows, no pool)
+  rows: 5                        # 5 rows
+  cols: 9                        # 9 columns
+  initial_sun: 50
+
+# =============================================================================
+# Card Loadout — exactly matching paper Table 4  (same as baseline)
+# =============================================================================
+cards:
+  slot_count: 10
+
+  plants:
+    # Slot 0: Sunflower (economy)
+    - slot: 0
+      id: 1
+      name: "Sunflower"
+      cost: 50
+
+    # Slot 1: Peashooter (basic offense)
+    - slot: 1
+      id: 0
+      name: "Peashooter"
+      cost: 100
+
+    # Slot 2: Potato Mine (trap)
+    - slot: 2
+      id: 4
+      name: "Potato Mine"
+      cost: 25
+
+    # Slot 3: Wall-nut (defense)
+    - slot: 3
+      id: 3
+      name: "Wall-nut"
+      cost: 50
+
+    # Slot 4: Repeater (double damage)
+    - slot: 4
+      id: 7
+      name: "Repeater"
+      cost: 200
+
+    # Slot 5: Squash (instant kill)
+    - slot: 5
+      id: 17
+      name: "Squash"
+      cost: 50
+
+    # Slot 6: Cherry Bomb (AOE instant)
+    - slot: 6
+      id: 2
+      name: "Cherry Bomb"
+      cost: 150
+
+    # Slot 7: Snow Pea (slow)
+    - slot: 7
+      id: 5
+      name: "Snow Pea"
+      cost: 175
+
+    # Slot 8: Melon-pult (AOE damage)
+    - slot: 8
+      id: 39
+      name: "Melon-pult"
+      cost: 300
+
+    # Slot 9: Spikeweed (ground trap)
+    - slot: 9
+      id: 21
+      name: "Spikeweed"
+      cost: 100
+
+# =============================================================================
+# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451  (same as baseline)
+# =============================================================================
+action_space:
+  type: "discrete"
+  size: 451
+
+  structure:
+    plant_actions: 450          # 10 cards × 45 cells
+    shovel_actions: 0           # disabled
+    wait_action: 1
+
+# =============================================================================
+# Observation Space — matches paper's 596-dim flat vector spec  (same as baseline)
+# Grid channels: 13-channel grid (used by PPO / PVZEnv internally)
+# DDQN adapter will extract paper-format: plant one-hot + HP + zombie HP + sun + cooldown
+# =============================================================================
+observation_space:
+  grid:
+    shape: [5, 9, 13]           # 5 rows × 9 cols × 13 channels
+    channels:
+      - "plant_type"
+      - "plant_hp"
+      - "plant_function"
+      - "zombie_density"
+      - "zombie_hp"
+      - "zombie_threat"
+      - "zombie_urgency"
+      - "zombie_status"
+      - "bullet_density"
+      - "bullet_threat"
+      - "dps_heatmap"
+      - "threat_heatmap"
+      - "kill_heatmap"
+
+  global:
+    features:
+      - "sun"
+      - "sun_producing"
+      - "wave"
+      - "total_waves"
+      - "wave_countdown"
+      - "game_clock"
+      - "zombie_count"
+      - "zombie_total_hp"
+      - "plant_count"
+      - "lawnmower_status"
+      - "cards_cd_ratio"
+      - "cards_affordable"
+      - "row_threat"
+      - "row_defense"
+      - "huge_wave_countdown"
+      - "zombie_refresh_hp"
+      - "ice_trails"
+      - "next_wave_preview"
+    total_dim: 65
+
+  card_attributes:
+    shape: [10, 7]
+
+# =============================================================================
+# Reward — sparse config matching baseline, with debug override
+# =============================================================================
+rewards:
+  # ═══ Debug mode: reward = zombie total_hp reduction per step ═══
+  debug_mode: "zombie_damage"
+
+  # Below matches baseline exactly (ignored when debug_mode is active)
+  zombie_kill:
+    use_type_rewards: true
+    default: 0.3
+    zombie: 0.2
+    flag: 0.2
+    conehead: 0.3
+    polevaulter: 0.5
+    buckethead: 0.6
+    newspaper: 0.3
+    screendoor: 0.6
+    football: 0.8
+    dancing: 0.5
+    backup: 0.2
+    duckytube: 0.2
+    snorkel: 0.4
+    bobsled: 0.4
+    dolphin: 0.5
+    jackinbox: 0.5
+    pogo: 0.5
+    yeti: 0.8
+    catapult: 0.7
+    imp: 0.2
+
+  coverage:
+    scale: 0.0
+  proximity:
+    scale: 0.0
+
+  sun_collect: 0.0
+  wave_complete: 0.0
+  game_win: 0.0
+  streak_bonus: 0.0
+  survival_per_step: 0.0
+  plant_sunflower: 0.0
+  plant_attacker: 0.0
+  plant_wall: 0.0
+  plant_lilypad: 0.0
+  plant_pumpkin: 0.0
+  plant_other: 0.0
+  plant_lost: 0.0
+  sunflower_lost: 0.0
+  lawnmower_triggered: 0.0
+  game_lose: 0.0
+  invalid_action: 0.0
+  wait_with_sun: 0.0
+
+  potential:
+    delta_scale: 0.0
+
+# =============================================================================
+# Training Configuration  (same as baseline except batch/buffer/frameskip)
+# =============================================================================
+training:
+  args:
+    algo: "ddqn"
+    port: 12345
+    num_envs: 1
+    base_port: 12345
+    ports: ""
+    pids: ""
+    auto_start: true
+    game_path: "gameobj/PlantsVsZombies.exe"
+    wait_time: 3.0
+    speed: 10.0
+    frameskip: 49               # DEBUG: 1 step ≈ 1 sec game time (baseline: 24)
+    auto_resume: true
+    env_console_log_level: 0
+    file_log_level: 1
+    execution: "async_worker_pool"
+    curriculum: "none"
+
+    # Paper observation format (one-hot + HP) — same as baseline
+    ddqn_paper_observation: true
+
+  ddqn:
+    ddqn_episodes: 10000        # same as baseline
+    ddqn_gamma: 0.99            # same as baseline
+    ddqn_batch_size: 512        # DEBUG: larger batch (baseline: 32)
+    ddqn_buffer_size: 100000    # DEBUG: larger buffer (baseline: 50000)
+    ddqn_burn_in: 10000         # same as baseline
+    ddqn_lr: 0.001              # same as baseline
+    ddqn_update_freq: 32
+    ddqn_sync_freq: 2000        # same as baseline
+    ddqn_eval_freq: 100
+    ddqn_eval_iters: 5
+    ddqn_checkpoint_freq: 500
+    ddqn_plot_freq: 50
+    ddqn_plot_path: null
+    ddqn_save_path: null
+    ddqn_load_path: null
+
+    # 4-layer deeper MLP: 2048→1024→512→256
+    ddqn_hidden_sizes: [2048, 1024, 512, 256]
+
+  env:
+    max_steps: 10000
+    normalize_obs: true
