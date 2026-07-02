@@ -75,9 +75,9 @@ class AsyncDDQNTrainer:
         # ── Restore optimizer state, replay buffer & episode count from checkpoint ──
         if restored_extra is not None:
             # PER hyper-params (restore before buffer so they match)
-            if restored_extra.get("per_alpha"):
+            if restored_extra.get("per_alpha") is not None:
                 self._per_alpha = float(restored_extra["per_alpha"])
-            if restored_extra.get("per_beta_start"):
+            if restored_extra.get("per_beta_start") is not None:
                 self._per_beta_start = float(restored_extra["per_beta_start"])
 
             if restored_extra.get("optimizer_state_dict"):
@@ -91,46 +91,15 @@ class AsyncDDQNTrainer:
             if restored_extra.get("buffer_data"):
                 from .checkpoint import _deserialize_buffer
                 self.buffer = _deserialize_buffer(restored_extra["buffer_data"])
-                # Ensure buffer capacity matches current config
-                self.buffer.memory_size = self.args.ddqn_buffer_size
-                self.buffer.burn_in = self.args.ddqn_burn_in
-                print(
-                    f"[DDQN] replay buffer 已恢复: "
-                    f"{len(self.buffer)} entries",
-                    flush=True,
-                )
-            if restored_extra.get("episode_count", 0) > self.stats.episode_count:
-                print(
-                    f"[DDQN] episode_count 从 checkpoint 覆盖: "
-                    f"{self.stats.episode_count} → {restored_extra['episode_count']}",
-                    flush=True,
-                )
-                self.stats.episode_count = restored_extra["episode_count"]
-            if restored_extra.get("transition_count", 0) > self.transition_count:
-                self.transition_count = restored_extra["transition_count"]
-
-
-        # ── Restore optimizer state, replay buffer & episode count from checkpoint ──
-        if restored_extra is not None:
-            if restored_extra.get("optimizer_state_dict"):
-                self.learner.network.optimizer.load_state_dict(
-                    restored_extra["optimizer_state_dict"]
-                )
-                print(
-                    "[DDQN] optimizer 状态已恢复 (Adam m/v buffers)",
-                    flush=True,
-                )
-            if restored_extra.get("buffer_data"):
-                from .checkpoint import _deserialize_buffer
-                self.buffer = _deserialize_buffer(restored_extra["buffer_data"])
-                # Ensure buffer capacity matches current config
-                self.buffer.memory_size = self.args.ddqn_buffer_size
-                self.buffer.burn_in = self.args.ddqn_burn_in
-                print(
-                    f"[DDQN] replay buffer 已恢复: "
-                    f"{len(self.buffer.replay_memory)} entries",
-                    flush=True,
-                )
+                if self.buffer is not None:
+                    self.buffer.burn_in = int(
+                        getattr(self.buffer, "burn_in", self.args.ddqn_burn_in)
+                    )
+                    print(
+                        f"[DDQN] replay buffer 已恢复: "
+                        f"{len(self.buffer)} entries, capacity={self.buffer.memory_size}",
+                        flush=True,
+                    )
             if restored_extra.get("episode_count", 0) > self.stats.episode_count:
                 print(
                     f"[DDQN] episode_count 从 checkpoint 覆盖: "

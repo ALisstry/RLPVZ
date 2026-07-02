@@ -180,24 +180,13 @@ class DDQNAlgorithm:
                 use_factored=use_factored,
             )
         else:
-            use_cnn = getattr(context.args, "use_cnn", False)
-        if use_cnn:
-            from .cnn_network import CNNQNetwork
-            use_factored = getattr(context.args, "use_factored", False)
-            network = CNNQNetwork(
+            network = QNetwork(
                 env,
                 learning_rate=context.args.ddqn_lr,
                 device=device,
-                use_factored=use_factored,
+                hidden_sizes=hidden_sizes,
+                n_inputs_override=n_inputs_override,
             )
-        else:
-            network = QNetwork(
-                    env,
-                    learning_rate=context.args.ddqn_lr,
-                    device=device,
-                    hidden_sizes=hidden_sizes,
-                    n_inputs_override=n_inputs_override,
-                )
         context.artifacts.network = network
 
         load_path = context.checkpoint.resolve_load_path()
