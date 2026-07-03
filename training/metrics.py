@@ -32,6 +32,12 @@ class TrainingSnapshot:
     eval_steps: list[int] = field(default_factory=list)
     eval_rewards: list[float] = field(default_factory=list)
     losses: list[float] = field(default_factory=list)
+    td_error_means: list[float] = field(default_factory=list)
+    mean_q_values: list[float] = field(default_factory=list)
+    max_q_values: list[float] = field(default_factory=list)
+    entropy_values: list[float] = field(default_factory=list)
+    advantage_values: list[float] = field(default_factory=list)
+    grad_norm_values: list[float] = field(default_factory=list)
     force: bool = False
 
 
@@ -145,6 +151,12 @@ class TrainingCurveWriter:
             eval_steps=snapshot.eval_steps,
             eval_rewards=snapshot.eval_rewards,
             losses=snapshot.losses,
+            td_error_means=snapshot.td_error_means,
+            mean_q_values=snapshot.mean_q_values,
+            max_q_values=snapshot.max_q_values,
+            entropy_values=snapshot.entropy_values,
+            advantage_values=snapshot.advantage_values,
+            grad_norm_values=snapshot.grad_norm_values,
             force=snapshot.force,
         )
 
@@ -169,6 +181,12 @@ def load_training_snapshot(path: str) -> TrainingSnapshot | None:
         eval_steps=[int(value) for value in raw.get("eval_steps", [])],
         eval_rewards=[float(value) for value in raw.get("eval_rewards", [])],
         losses=[float(value) for value in raw.get("losses", [])],
+        td_error_means=[float(value) for value in raw.get("td_error_means", [])],
+        mean_q_values=[float(value) for value in raw.get("mean_q_values", [])],
+        max_q_values=[float(value) for value in raw.get("max_q_values", [])],
+        entropy_values=[float(value) for value in raw.get("entropy_values", [])],
+        advantage_values=[float(value) for value in raw.get("advantage_values", [])],
+        grad_norm_values=[float(value) for value in raw.get("grad_norm_values", [])],
         force=bool(raw.get("force", False)),
     )
 

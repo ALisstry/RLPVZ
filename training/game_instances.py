@@ -28,8 +28,9 @@ def prepare_game_instances(args):
             print("[警告] auto_start 关闭时需要手动启动所有 PVZ 进程或使用 --pids")
         return instances
 
-    # Auto-start: 先启动 PvZ Toolkit，再根据实例数自动启动游戏进程并注入 DLL
-    _launch_toolkit()
+    # Auto-start: 可选用启动 PvZ Toolkit，再根据实例数自动启动游戏进程并注入 DLL
+    if getattr(args, "launch_toolkit", False):
+        _launch_toolkit()
 
     multi = len(instances) > 1
     known_pids = set(list_pvz_processes())

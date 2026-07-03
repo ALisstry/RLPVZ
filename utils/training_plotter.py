@@ -39,6 +39,12 @@ class TrainingCurvePlotter:
         eval_steps,
         eval_rewards,
         losses,
+        td_error_means=None,
+        mean_q_values=None,
+        max_q_values=None,
+        entropy_values=None,
+        advantage_values=None,
+        grad_norm_values=None,
         force: bool = False,
     ) -> None:
         if not self.enabled:
@@ -56,6 +62,15 @@ class TrainingCurvePlotter:
             ("episode_rewards", lambda: self._plot_episode_rewards(episode_rewards, mean_rewards)),
             ("iterations",    lambda: self._plot_iterations(mean_iterations)),
             ("loss",          lambda: self._plot_loss(losses)),
+            ("td_error",      lambda: self._plot_td_error(td_error_means)),
+            ("q_values",      lambda: self._plot_q_values(mean_q_values, max_q_values)),
+            ("entropy",       lambda: self._plot_entropy(entropy_values)),
+            ("advantage",     lambda: self._plot_line(
+                advantage_values, "Advantage", "#9467bd",
+                ylabel="Advantage  Q(s,a) - mean(Q)")),
+            ("grad_norm",     lambda: self._plot_line(
+                grad_norm_values, "Gradient Norm", "#d62728",
+                ylabel="||grad||  (pre-clip)")),
         ]
         for name, plot_fn in plots:
             try:
@@ -243,6 +258,202 @@ class TrainingCurvePlotter:
         self._legend_if_available(ax)
         fig.tight_layout()
         fig.savefig(self._derived_path("loss"))
+        plt.close(fig)
+
+    def _plot_td_error(self, td_error_means):
+        plt = self._plt
+        fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
+        ax.set_title("TD Error")
+
+        if td_error_means:
+            td_arr = np.asarray(td_error_means, dtype=np.float64)
+            x = np.arange(1, len(td_arr) + 1)
+
+            if len(td_arr) >= 20:
+                display_low = float(np.percentile(td_arr, 2.0))
+                display_high = float(np.percentile(td_arr, 98.0))
+            else:
+                display_low = float(np.min(td_arr))
+                display_high = float(np.max(td_arr))
+
+            min_td = float(np.min(td_arr))
+            max_td = float(np.max(td_arr))
+            if display_low == display_high:
+                padding = max(1.0, abs(display_high) * 0.1)
+                display_low -= padding
+                display_high += padding
+
+            clipped = (td_arr < display_low) | (td_arr > display_high)
+            visible_td = np.clip(td_arr, display_low, display_high)
+
+            ax.plot(
+                x,
+                visible_td,
+                color="#17becf",
+                linewidth=1.0,
+                alpha=0.85,
+                label="mean |TD| (display-clipped)",
+            )
+
+            window = min(200, max(10, len(td_arr) // 20))
+            if len(td_arr) >= window:
+                kernel = np.ones(window, dtype=np.float64) / window
+                smooth = np.convolve(td_arr, kernel, mode="valid")
+                smooth_x = np.arange(window, len(td_arr) + 1)
+                ax.plot(
+                    smooth_x,
+                    np.clip(smooth, display_low, display_high),
+                    color="#e377c2",
+                    linewidth=2.0,
+                    label=f"moving avg ({window})",
+                )
+
+            if np.any(clipped):
+                ax.scatter(
+                    x[clipped],
+                    np.clip(td_arr[clipped], display_low, display_high),
+                    color="#d62728",
+                    s=10,
+                    alpha=0.8,
+                    label="clipped spikes",
+                )
+                ax.text(
+                    0.99,
+                    0.97,
+                    f"display=[{display_low:.3g}, {display_high:.3g}] | raw=[{min_td:.3g}, {max_td:.3g}] | clipped={np.count_nonzero(clipped)}",
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize=9,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8),
+                )
+
+            padding = max(1e-6, (display_high - display_low) * 0.05)
+            ax.set_ylim(display_low - padding, display_high + padding)
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No TD error values yet",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+                fontsize=11,
+            )
+
+        ax.set_xlabel("Update Step")
+        ax.set_ylabel("Mean |TD Error|")
+        ax.grid(True, alpha=0.3)
+        self._legend_if_available(ax)
+        fig.tight_layout()
+        fig.savefig(self._derived_path("td_error"))
+        plt.close(fig)
+
+    def _plot_q_values(self, mean_q_values, max_q_values):
+        plt = self._plt
+        fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
+        ax.set_title("Q-Values")
+
+        has_data = False
+        if mean_q_values:
+            ax.plot(
+                np.arange(1, len(mean_q_values) + 1),
+                mean_q_values,
+                color="#1f77b4",
+                linewidth=1.5,
+                alpha=0.8,
+                label="mean Q",
+            )
+            has_data = True
+        if max_q_values:
+            ax.plot(
+                np.arange(1, len(max_q_values) + 1),
+                max_q_values,
+                color="#ff7f0e",
+                linewidth=1.5,
+                alpha=0.8,
+                label="max Q",
+            )
+            has_data = True
+
+        if not has_data:
+            ax.text(0.5, 0.5, "No Q-value data yet", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=11)
+
+        ax.set_xlabel("Update Step")
+        ax.set_ylabel("Q-Value")
+        ax.grid(True, alpha=0.3)
+        self._legend_if_available(ax)
+        fig.tight_layout()
+        fig.savefig(self._derived_path("q_values"))
+        plt.close(fig)
+
+    def _plot_entropy(self, entropy_values):
+        plt = self._plt
+        fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
+        ax.set_title("Policy Entropy  (softmax over Q-values)")
+
+        if entropy_values:
+            ent_arr = np.asarray(entropy_values, dtype=np.float64)
+            x = np.arange(1, len(ent_arr) + 1)
+
+            ax.plot(x, ent_arr,
+                    color="#2ca02c", linewidth=1.0, alpha=0.7,
+                    label="entropy")
+
+            window = min(200, max(10, len(ent_arr) // 20))
+            if len(ent_arr) >= window:
+                kernel = np.ones(window, dtype=np.float64) / window
+                smooth = np.convolve(ent_arr, kernel, mode="valid")
+                smooth_x = np.arange(window, len(ent_arr) + 1)
+                ax.plot(smooth_x, smooth,
+                        color="#8c564b", linewidth=2.0,
+                        label=f"moving avg ({window})")
+
+            # Reference: max entropy = ln(n_actions) = ln(451) ≈ 6.11
+            max_h = np.log(451)
+            ax.axhline(y=max_h, color="#d62728", linewidth=1.0, linestyle="--",
+                       alpha=0.6, label=f"max entropy (ln 451 ≈ {max_h:.1f})")
+        else:
+            ax.text(0.5, 0.5, "No entropy data yet", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=11)
+
+        ax.set_xlabel("Update Step")
+        ax.set_ylabel("Entropy (nats)")
+        ax.grid(True, alpha=0.3)
+        self._legend_if_available(ax)
+        fig.tight_layout()
+        fig.savefig(self._derived_path("entropy"))
+        plt.close(fig)
+
+    def _plot_line(self, values, title, color, ylabel, moving_avg=True):
+        plt = self._plt
+        fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
+        ax.set_title(title)
+
+        if values:
+            arr = np.asarray(values, dtype=np.float64)
+            x = np.arange(1, len(arr) + 1)
+            ax.plot(x, arr, color=color, linewidth=1.0, alpha=0.7, label=ylabel)
+
+            if moving_avg and len(arr) >= 10:
+                window = min(200, max(10, len(arr) // 20))
+                kernel = np.ones(window, dtype=np.float64) / window
+                smooth = np.convolve(arr, kernel, mode="valid")
+                smooth_x = np.arange(window, len(arr) + 1)
+                ax.plot(smooth_x, smooth,
+                        color="#8c564b", linewidth=2.0,
+                        label=f"moving avg ({window})")
+        else:
+            ax.text(0.5, 0.5, f"No {title} data yet", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=11)
+
+        ax.set_xlabel("Update Step")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        self._legend_if_available(ax)
+        fig.tight_layout()
+        fig.savefig(self._derived_path(title.lower().replace(" ", "_")))
         plt.close(fig)
 
     @staticmethod

@@ -144,6 +144,7 @@ training:
     ports: ""
     pids: ""
     auto_start: true
+    launch_toolkit: false         # PvZ Toolkit 默认不启动
     game_path: "gameobj/PlantsVsZombies.exe"
     wait_time: 3.0
     speed: 10.0

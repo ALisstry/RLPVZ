@@ -209,11 +209,34 @@ class AsyncDDQNTrainer:
 
                     result = self.learner.update(self.buffer, beta=beta)
                     if result is not None:
-                        loss_value, tree_indices, td_errors = result
+                        loss_value, tree_indices, td_errors, q_stats, grad_norm = result
                         self.buffer.update_priorities(tree_indices, td_errors)
                         self.stats.record_loss(loss_value)
+                        mean_td = float(np.mean(np.abs(td_errors)))
+                        self.stats.record_td_error(mean_td)
                         self.metric_emitter.emit_loss(
                             loss_value=loss_value,
+                            transition_count=self.transition_count,
+                            episode_count=self.stats.episode_count,
+                        )
+                        self.metric_emitter.emit_td_error(
+                            td_error_mean=mean_td,
+                            transition_count=self.transition_count,
+                            episode_count=self.stats.episode_count,
+                        )
+                        self.stats.record_q_stats(
+                            mean_q=q_stats["mean_q"],
+                            max_q=q_stats["max_q"],
+                            entropy=q_stats["entropy"],
+                            advantage=q_stats["advantage"],
+                            grad_norm=grad_norm,
+                        )
+                        self.metric_emitter.emit_q_stats(
+                            mean_q=q_stats["mean_q"],
+                            max_q=q_stats["max_q"],
+                            entropy=q_stats["entropy"],
+                            advantage=q_stats["advantage"],
+                            grad_norm=grad_norm,
                             transition_count=self.transition_count,
                             episode_count=self.stats.episode_count,
                         )
