@@ -2,11 +2,9 @@ from copy import deepcopy
 
 import numpy as np
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 
 from .ddqn import copy_state_dict_to_cpu
-
-_mseloss = nn.MSELoss()
 
 
 class DDQNLearner:
@@ -27,7 +25,12 @@ class DDQNLearner:
         self.target_network.load_state_dict(self.network.state_dict())
         return self.state_dict_cpu()
 
-    def calculate_loss(self, batch):
+    def calculate_loss(self, batch, is_weights=None):
+        """Double-DQN loss, optionally with PER importance-sampling weights.
+
+        Returns:
+            (loss, td_errors) — *loss* is scalar, *td_errors* is (B, 1) numpy array.
+        """
         states, actions, rewards, dones, next_states, masks, next_masks = [
             item for item in batch
         ]
@@ -61,21 +64,40 @@ class DDQNLearner:
             qvals_next = torch.gather(target_qvals, 1, next_actions_t)
         qvals_next[dones_t] = 0
         expected_qvals = self.gamma * qvals_next + rewards_t
-        return _mseloss(qvals, expected_qvals)
 
-    def update(self, replay_buffer):
+        # Element-wise TD errors for PER priority updates
+        td_errors = (expected_qvals - qvals).detach()
+
+        # PER importance-sampling correction
+        elementwise_loss = F.mse_loss(qvals, expected_qvals, reduction='none')
+        if is_weights is not None:
+            is_weights_t = torch.as_tensor(
+                is_weights, dtype=torch.float32, device=elementwise_loss.device,
+            )
+            loss = (elementwise_loss * is_weights_t).mean()
+        else:
+            loss = elementwise_loss.mean()
+
+        return loss, td_errors.cpu().numpy()
+
+    def update(self, replay_buffer, beta: float = 0.4):
+        """Single gradient step.  Returns ``(loss, tree_indices, td_errors)``
+        so the caller can update PER priorities, or ``None`` on OOM skip."""
         self.network.optimizer.zero_grad(set_to_none=True)
-        batch = replay_buffer.sample_batch(batch_size=self.batch_size)
+        batch, tree_indices, is_weights = replay_buffer.sample_batch(
+            batch_size=self.batch_size, beta=beta,
+        )
 
         try:
-            loss = self.calculate_loss(batch)
+            loss, td_errors = self.calculate_loss(batch, is_weights)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=10.0)
             self.network.optimizer.step()
             return (
                 float(loss.detach().cpu().item())
                 if self.network.device == "cuda"
                 else float(loss.detach().item())
-            )
+            ), tree_indices, td_errors
         except (RuntimeError, torch.AcceleratorError) as exc:
             message = str(exc).lower()
             is_oom = "out of memory" in message or "cudaerrormemoryallocation" in message

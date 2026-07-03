@@ -1,18 +1,15 @@
-# PVZ AI Debug Training Configuration — CNN Variant
-# Based on baseline (paper spec), with zombie-damage reward for dense learning signal.
-# Uses dual-branch CNN instead of MLP for grid encoding.
-#
-# Differences from baseline_cnn:
-#   - rewards.debug_mode: "zombie_damage"  (reward = zombie HP reduction per step)
-#   - frameskip: 49                        (1 step ≈ 1 sec game time)
-#   - ddqn_batch_size: 500                 (larger batch for stable gradients)
-#   - ddqn_buffer_size: 100000             (larger replay buffer)
+# PVZ AI Baseline Training Configuration — CNN + Factored Action Heads
+# Survival Day — same paper spec, dual-branch CNN + factored 56-dim output
+#   - 3x3 branch: local spatial patterns (adjacent cells)
+#   - 1x9 branch: full-row patterns (entire row defence/offence)
+#   - Factored heads: wait(1) + position(45) + card(10) → outer-sum → 451 Q-values
+# Param count: ~6.05M (baseline 6.34M, diff -4.7%)
 #
 # Usage:
-#   .\.venv\Scripts\python.exe train.py --training_config training_config_debug_cnn.yaml
+#   .\.venv\Scripts\python.exe train.py --training_config training_config_baseline_cnn.yaml
 
 # =============================================================================
-# Game Settings — Survival: Day  (same as baseline)
+# Game Settings — Survival: Day
 # =============================================================================
 game:
   mode: "survival_day"           # 生存模式(白天)
@@ -24,7 +21,7 @@ game:
   initial_sun: 50
 
 # =============================================================================
-# Card Loadout — exactly matching paper Table 4  (same as baseline)
+# Card Loadout — exactly matching paper Table 4
 # =============================================================================
 cards:
   slot_count: 10
@@ -91,7 +88,7 @@ cards:
       cost: 100
 
 # =============================================================================
-# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451  (same as baseline)
+# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451
 # =============================================================================
 action_space:
   type: "discrete"
@@ -103,7 +100,7 @@ action_space:
     wait_action: 1
 
 # =============================================================================
-# Observation Space — matches paper's 596-dim flat vector spec  (same as baseline)
+# Observation Space — matches paper's 596-dim flat vector spec
 # Grid channels: 13-channel grid (used by PPO / PVZEnv internally)
 # DDQN adapter will extract paper-format: plant one-hot + HP + zombie HP + sun + cooldown
 # =============================================================================
@@ -145,47 +142,47 @@ observation_space:
       - "zombie_refresh_hp"
       - "ice_trails"
       - "next_wave_preview"
-    total_dim: 65
+    total_dim: 65               # 5 + 1+1+1+1+1+1+1+1 + 5 + 10 + 10 + 5 + 5 + 1 + 1 + 5 + 10
 
   card_attributes:
     shape: [10, 7]
 
 # =============================================================================
-# Reward — sparse config matching baseline, with debug override
+# Reward — sparse zombie-kill-only rewards matching paper Table 5
+# All reward values are scaled down compared to original config for stability
 # =============================================================================
 rewards:
-  # ═══ Debug mode: reward = zombie total_hp reduction per step ═══
-  debug_mode: "zombie_damage"
-
-  # Below matches baseline exactly (ignored when debug_mode is active)
+  # Zombie kill rewards (sparse signal — matches paper Table 5)
   zombie_kill:
     use_type_rewards: true
-    default: 0.3
-    zombie: 0.2
-    flag: 0.2
-    conehead: 0.3
-    polevaulter: 0.5
-    buckethead: 0.6
-    newspaper: 0.3
-    screendoor: 0.6
-    football: 0.8
-    dancing: 0.5
-    backup: 0.2
-    duckytube: 0.2
-    snorkel: 0.4
-    bobsled: 0.4
-    dolphin: 0.5
-    jackinbox: 0.5
-    pogo: 0.5
-    yeti: 0.8
-    catapult: 0.7
-    imp: 0.2
+    default: 3                # Fallback for unlisted zombie types
+    zombie: 2                 # Basic Zombie
+    flag: 2
+    conehead: 3               # Conehead Zombie
+    polevaulter: 5            # Pole Vaulter Zombie
+    buckethead: 6             # Buckethead Zombie
+    newspaper: 3
+    screendoor: 6
+    football: 8               # Football Zombie
+    dancing: 5
+    backup: 2
+    duckytube: 2
+    snorkel: 4
+    bobsled: 4
+    dolphin: 5
+    jackinbox: 5
+    pogo: 5
+    yeti: 8
+    catapult: 7
+    imp: 2
 
+  # Hardcoded reward components — explicitly zero for sparse baseline
   coverage:
-    scale: 0.0
+    scale: 0.0                   # row-coverage bonus
   proximity:
-    scale: 0.0
+    scale: 0.0                   # zombie-proximity penalty
 
+  # All auxiliary rewards set to 0 for clean sparse baseline
   sun_collect: 0.0
   wave_complete: 0.0
   game_win: 0.0
@@ -204,11 +201,12 @@ rewards:
   invalid_action: 0.0
   wait_with_sun: 0.0
 
+  # Potential-based shaping: disabled for clean baseline
   potential:
     delta_scale: 0.0
 
 # =============================================================================
-# Training Configuration  (same as baseline_cnn except batch/buffer/frameskip)
+# Training Configuration
 # =============================================================================
 training:
   args:
@@ -222,29 +220,29 @@ training:
     game_path: "gameobj/PlantsVsZombies.exe"
     wait_time: 3.0
     speed: 10.0
-    frameskip: 49               # DEBUG: 1 step ≈ 1 sec game time (baseline: 24)
+    frameskip: 24               # matches paper: ~4-5 decisions per in-game second
     auto_resume: true
     env_console_log_level: 0
     file_log_level: 1
     execution: "async_worker_pool"
     curriculum: "none"
 
-    # Paper observation format (one-hot + HP) — same as baseline
-    ddqn_paper_observation: true
-
     # Use dual-branch CNN instead of MLP
     use_cnn: true
 
+    # Factored action heads: wait(1) + position(45) + card(10) = 56
+    use_factored: true
+
   ddqn:
-    ddqn_episodes: 10000        # same as baseline
-    ddqn_gamma: 0.99            # same as baseline
-    ddqn_batch_size: 500        # DEBUG: larger batch (baseline: 32)
-    ddqn_buffer_size: 100000    # DEBUG: larger buffer (baseline: 50000)
-    ddqn_burn_in: 10000         # same as baseline
-    ddqn_lr: 0.001              # same as baseline
+    ddqn_episodes: 10000        # paper: 10,000 episodes
+    ddqn_gamma: 0.99            # paper spec
+    ddqn_batch_size: 32         # paper spec
+    ddqn_buffer_size: 50000     # paper spec
+    ddqn_burn_in: 10000         # paper spec
+    ddqn_lr: 0.001              # paper spec
     ddqn_update_freq: 32
-    ddqn_sync_freq: 2000        # same as baseline
-    ddqn_eval_freq: 100
+    ddqn_sync_freq: 2000        # paper spec: target sync every 2000 steps
+    ddqn_eval_freq: 100         # evaluate every 100 episodes
     ddqn_eval_iters: 5
     ddqn_checkpoint_freq: 500
     ddqn_plot_freq: 50
@@ -253,7 +251,6 @@ training:
     ddqn_load_path: null
 
     # Paper network architecture: 2 hidden layers of 2048 each
-    # (used by MLP; CNN ignores this and uses its own architecture)
     ddqn_hidden_sizes: [2048, 2048]
 
   env:

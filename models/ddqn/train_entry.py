@@ -168,6 +168,7 @@ class DDQNAlgorithm:
             env.rows, env.cols, env.num_cards)
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        use_paper_obs = getattr(context.args, "ddqn_paper_observation", True)
         use_cnn = getattr(context.args, "use_cnn", False)
         if use_cnn:
             from .cnn_network import CNNQNetwork
@@ -206,7 +207,7 @@ class DDQNAlgorithm:
             else:
                 print("[DDQN] 旧版 checkpoint (仅权重)，optimizer/buffer 从零开始")
 
-        _print_network_summary(network, use_paper, hidden_sizes, device)
+        _print_network_summary(network, use_paper_obs, hidden_sizes, device)
 
         trainer = AsyncDDQNTrainer(
             context.args,

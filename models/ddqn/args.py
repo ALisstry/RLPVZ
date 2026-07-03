@@ -67,3 +67,22 @@ def add_args(group):
         default=argparse.SUPPRESS,
         help="DDQN hidden layer sizes, comma-separated (e.g. 2048,2048)",
     )
+    # PER (Prioritized Experience Replay)
+    group.add_argument(
+        "--ddqn_per_alpha",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="PER prioritization exponent (0=uniform, 1=full priority, default 0.6)",
+    )
+    group.add_argument(
+        "--ddqn_per_beta",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="PER IS correction start value (anneals to 1.0, default 0.4)",
+    )
+    group.add_argument(
+        "--ddqn_per_epsilon",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="PER small positive constant to avoid zero priority (default 1e-6)",
+    )

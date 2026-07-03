@@ -2,18 +2,213 @@ import argparse
 import csv
 import json
 import os
+import random
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from models.ddqn.evaluate import evaluate_ddqn
+from models.ddqn.worker_pool import build_ddqn_env
 from models.ppo.evaluate import evaluate_ppo
 from training.args import get_args
-from training.evaluation import EvaluationWriter, load_evaluation_config
+from training.evaluation import (
+    EpisodeEvalResult,
+    EvaluationWriter,
+    elapsed_since,
+    load_evaluation_config,
+    new_eval_id,
+    summarize_diagnostics,
+    summarize_eval_results,
+    summarize_plant_stats,
+    time_eval_run,
+)
 from training.game_instances import prepare_game_instances
 from training.paths import get_cached_model_path
 from training.registry import available_algorithms
 from training.specs import build_base_eval_specs
 from utils.train_utils import load_training_config
+
+
+def _split_episodes(total, num_workers):
+    """Split *total* episodes evenly across *num_workers* workers.
+
+    Returns a list of ``(start_index, count)`` tuples.  Workers with zero
+    episodes are omitted.
+    """
+    base = total // num_workers
+    remainder = total % num_workers
+    splits = []
+    start = 0
+    for i in range(num_workers):
+        count = base + (1 if i < remainder else 0)
+        if count > 0:
+            splits.append((start, count))
+            start += count
+    return splits
+
+
+def _random_worker_run(
+    args,
+    instance,
+    env_spec,
+    scenario_spec,
+    num_episodes,
+    start_index,
+    total_episodes,
+    worker_id,
+):
+    """Run random-eval episodes on a single game instance (used by workers)."""
+    env = None
+    details = []
+    try:
+        env = build_ddqn_env(
+            args,
+            instance,
+            worker_id=f"eval-random-w{worker_id}",
+            env_spec=env_spec,
+            scenario_spec=scenario_spec,
+        )
+        for i in range(num_episodes):
+            state = env.reset()
+            done = False
+            total_reward = 0.0
+            actions = 0
+            info = {}
+            while not done:
+                mask = env.mask_available_actions()
+                valid_actions = [j for j, m in enumerate(mask) if m > 0]
+                action = random.choice(valid_actions) if valid_actions else 0
+                state, reward, done, info = env.step(action)
+                total_reward += float(reward)
+                actions += 1
+
+            episode_index = start_index + i + 1
+            details.append(
+                EpisodeEvalResult(
+                    eval_id="",
+                    episode_index=episode_index,
+                    reward=float(total_reward),
+                    survival=float(
+                        info.get("steps", getattr(env, "steps", actions))
+                    ),
+                    win=bool(info.get("win") is True),
+                    game_ended=bool(info.get("game_ended", done)),
+                    completed_sublevels=_optional_int(
+                        info.get("completed_sublevels")
+                    ),
+                    zombies_killed=_optional_int(info.get("zombies_killed")),
+                    plants_lost=_optional_int(info.get("plants_lost")),
+                    actions=actions,
+                    extra={
+                        "current_sublevel_index": info.get(
+                            "current_sublevel_index"
+                        ),
+                        "sublevel_cleared_this_step": info.get(
+                            "sublevel_cleared_this_step"
+                        ),
+                        "plant_stats": info.get("plant_stats", {}),
+                        "diagnostics": info.get("diagnostics", {}),
+                    },
+                )
+            )
+            print(
+                f"[Eval][Random][W{worker_id}] episode {episode_index}/{total_episodes} | "
+                f"reward={total_reward:.2f} | "
+                f"survival={details[-1].survival:.0f} | "
+                f"win={details[-1].win} | "
+                f"actions={actions}",
+                flush=True,
+            )
+    finally:
+        if env is not None and hasattr(env, "close"):
+            env.close()
+    return details
+
+
+def evaluate_random(
+    args,
+    instances,
+    env_spec,
+    scenario_spec,
+    episodes,
+    num_workers=1,
+):
+    """Evaluate with uniformly random actions (respecting action masks).
+
+    When *num_workers* > 1, episodes are distributed across parallel
+    threads, each driving its own game instance.
+    """
+    if not instances:
+        raise ValueError("Random eval requires at least one game instance")
+
+    num_workers = max(1, min(num_workers, len(instances)))
+    eval_id = new_eval_id("real_random")
+    start_time = time_eval_run()
+
+    episode_splits = _split_episodes(episodes, num_workers)
+    actual_workers = len(episode_splits)
+
+    all_details = []
+    if actual_workers == 1:
+        start_idx, count = episode_splits[0]
+        all_details = _random_worker_run(
+            args=args,
+            instance=instances[0],
+            env_spec=env_spec,
+            scenario_spec=scenario_spec,
+            num_episodes=count,
+            start_index=start_idx,
+            total_episodes=episodes,
+            worker_id=0,
+        )
+    else:
+        print(
+            f"[Eval][Random] Dispatching {episodes} episodes "
+            f"across {actual_workers} parallel workers"
+        )
+        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+            futures = {}
+            for worker_id, (start_idx, count) in enumerate(episode_splits):
+                future = executor.submit(
+                    _random_worker_run,
+                    args=args,
+                    instance=instances[worker_id],
+                    env_spec=env_spec,
+                    scenario_spec=scenario_spec,
+                    num_episodes=count,
+                    start_index=start_idx,
+                    total_episodes=episodes,
+                    worker_id=worker_id,
+                )
+                futures[future] = worker_id
+
+            for future in as_completed(futures):
+                all_details.extend(future.result())
+
+        all_details.sort(key=lambda d: d.episode_index)
+
+    return summarize_eval_results(
+        eval_id=eval_id,
+        algo="random",
+        env_kind="real",
+        episode=None,
+        step=None,
+        stage_name="base",
+        win_condition=scenario_spec.win_condition,
+        target_sublevels=scenario_spec.target_sublevels,
+        details=all_details,
+        duration_sec=elapsed_since(start_time),
+        model_path=None,
+        extra={
+            "game_mode_id": scenario_spec.game_mode_id,
+            "rows": scenario_spec.rows,
+            "cols": scenario_spec.cols,
+            "initial_sun": scenario_spec.initial_sun,
+            "cards": list(scenario_spec.cards),
+            "plant_stats": summarize_plant_stats(all_details),
+            "diagnostics": summarize_diagnostics(all_details),
+        },
+    )
 
 
 def main(argv=None):
@@ -22,8 +217,12 @@ def main(argv=None):
     eval_config = _load_eval_config(args)
     _apply_eval_instance_config(args, eval_args, eval_config)
 
-    model_path = eval_args.model or get_cached_model_path(args.algo)
-    output_dir = eval_args.eval_output or _default_eval_output(args.algo)
+    model_path = (
+        None if eval_args.random
+        else eval_args.model or get_cached_model_path(args.algo)
+    )
+    algo_label = "random" if eval_args.random else args.algo
+    output_dir = eval_args.eval_output or _default_eval_output(algo_label)
     episodes = eval_args.eval_episodes or eval_config.episodes
 
     env_spec, scenario_spec = build_base_eval_specs(args)
@@ -34,13 +233,23 @@ def main(argv=None):
         episodes=episodes,
         env_spec=env_spec,
         scenario_spec=scenario_spec,
+        random_mode=eval_args.random,
     )
     instances = prepare_game_instances(args)
     if instances is None:
         return
     _print_instances(instances)
 
-    if args.algo == "ddqn":
+    if eval_args.random:
+        result = evaluate_random(
+            args=args,
+            instances=instances,
+            env_spec=env_spec,
+            scenario_spec=scenario_spec,
+            episodes=episodes,
+            num_workers=eval_args.eval_workers,
+        )
+    elif args.algo == "ddqn":
         result = evaluate_ddqn(
             args=args,
             model_path=model_path,
@@ -48,6 +257,7 @@ def main(argv=None):
             env_spec=env_spec,
             scenario_spec=scenario_spec,
             episodes=episodes,
+            num_workers=eval_args.eval_workers,
         )
     elif args.algo == "ppo":
         result = evaluate_ppo(
@@ -58,6 +268,7 @@ def main(argv=None):
             scenario_spec=scenario_spec,
             episodes=episodes,
             device="auto",
+            num_workers=eval_args.eval_workers,
         )
     else:
         raise NotImplementedError(
@@ -69,7 +280,10 @@ def main(argv=None):
         save_episode_details=eval_config.save_episode_details,
     )
     writer.write(result)
-    copied_model_path = _copy_model_to_eval_output(model_path, output_dir)
+    if model_path:
+        copied_model_path = _copy_model_to_eval_output(model_path, output_dir)
+    else:
+        copied_model_path = None
     plant_stats_path = _write_plant_stats(result, output_dir)
     diagnostics_paths = _write_diagnostics(result, output_dir)
     _print_eval_result(result)
@@ -104,6 +318,18 @@ def _parse_eval_args(argv=None):
         default=None,
         help="Directory for eval.jsonl/eval.csv/eval_snapshot.json",
     )
+    parser.add_argument(
+        "--random",
+        action="store_true",
+        default=False,
+        help="Use random actions instead of a trained model (baseline evaluation)",
+    )
+    parser.add_argument(
+        "--eval_workers",
+        type=int,
+        default=1,
+        help="Number of parallel workers for evaluation (requires multiple game instances)",
+    )
     eval_args, train_argv = parser.parse_known_args(argv)
     if eval_args.algo:
         train_argv.extend(["--algo", eval_args.algo])
@@ -118,7 +344,8 @@ def _load_eval_config(args):
 
 
 def _apply_eval_instance_config(args, eval_args, eval_config):
-    args.num_envs = 1
+    num_workers = max(1, int(getattr(eval_args, "eval_workers", 1)))
+    args.num_envs = num_workers
     if eval_config.real_base_port is not None:
         args.base_port = eval_config.real_base_port
         args.port = eval_config.real_base_port
@@ -127,6 +354,12 @@ def _apply_eval_instance_config(args, eval_args, eval_config):
 def _default_eval_output(algo):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join("eval_output", algo, timestamp)
+
+
+def _optional_int(value):
+    if value is None:
+        return None
+    return int(value)
 
 
 def _copy_model_to_eval_output(model_path, output_dir):
@@ -208,16 +441,20 @@ def _write_diagnostics(result, output_dir):
 
 
 def _print_eval_metadata(args, model_path, output_dir, episodes,
-                         env_spec, scenario_spec):
+                         env_spec, scenario_spec, random_mode=False):
     sep = "-" * 58
     print(f"\n{sep}")
     print("  Evaluation Configuration")
     print(f"{sep}")
-    print(f"  {'Algorithm:':24s} {args.algo}")
-    print(f"  {'Model path:':24s} {model_path}")
+    algo_label = "random (baseline)" if random_mode else args.algo
+    print(f"  {'Algorithm:':24s} {algo_label}")
+    model_label = model_path or "(none — random mode)"
+    print(f"  {'Model path:':24s} {model_label}")
     print(f"  {'Output dir:':24s} {output_dir}")
     print(f"  {'Episodes:':24s} {episodes}")
     print(f"  {'Eval envs:':24s} {args.num_envs}")
+    num_workers = max(1, int(getattr(args, "num_envs", 1)))
+    print(f"  {'Parallel workers:':24s} {num_workers}")
     print(f"  {'Base port:':24s} {getattr(args, 'base_port', args.port)}")
     print(f"  {'Grid:':24s} {env_spec.rows}x{env_spec.cols}")
     print(f"  {'Actions:':24s} {env_spec.action_space_size}")

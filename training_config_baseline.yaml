@@ -1,23 +1,24 @@
 # PVZ AI Baseline Training Configuration
-# Survival Day — matches paper spec (596-dim obs, 2048→2048 DDQN, sparse reward)
+# Dense reward: zombie HP reduction per step (zombie_damage).
+# MLP architecture: 596 → 2048 → 2048 → 451.
+#
+# This is the primary baseline. All baseline_* variants share the same reward
+# and differ only in network architecture.
 #
 # Usage:
 #   .\.venv\Scripts\python.exe train.py --training_config training_config_baseline.yaml
 
 # =============================================================================
-# Game Settings — Survival: Day
+# Game Settings — Survival: Day  (same as baseline)
 # =============================================================================
 game:
-  mode: "survival_day"           # 生存模式(白天)
   game_mode_id: 1                # GAMEMODE_SURVIVAL_NORMAL_STAGE_1 = 生存白天
-  background_type: 0             # BACKGROUND_DAY
-  map: "day"                     # 草地 (5 rows, no pool)
   rows: 5                        # 5 rows
   cols: 9                        # 9 columns
   initial_sun: 50
 
 # =============================================================================
-# Card Loadout — exactly matching paper Table 4
+# Card Loadout — exactly matching paper Table 4  (same as baseline)
 # =============================================================================
 cards:
   slot_count: 10
@@ -84,10 +85,9 @@ cards:
       cost: 100
 
 # =============================================================================
-# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451
+# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451  (same as baseline)
 # =============================================================================
 action_space:
-  type: "discrete"
   size: 451
 
   structure:
@@ -96,113 +96,44 @@ action_space:
     wait_action: 1
 
 # =============================================================================
-# Observation Space — matches paper's 596-dim flat vector spec
-# Grid channels: 13-channel grid (used by PPO / PVZEnv internally)
-# DDQN adapter will extract paper-format: plant one-hot + HP + zombie HP + sun + cooldown
+# Observation Space — Paper-format 596-dim flat vector
+#
+# DDQN adapter (ddqn_paper_observation=true) extracts from 13-ch grid:
+#   sun count           :  1 dim
+#   card cooldowns      : 10 dim
+#   plant type one-hot  : 5×9×(10+1) = 495 dim  (card-slot one-hot, not plant-id)
+#   plant HP grid       : 5×9 = 45 dim
+#   zombie HP grid      : 5×9 = 45 dim
+#   ─────────────────────────────────────────────
+#   Total               : 596 dim
+#
+# Grid shape & global total_dim kept for PVZEnv Dict obs init (PPO compat).
+# global_features & card_attributes are ignored by DDQN paper adapter.
 # =============================================================================
 observation_space:
   grid:
     shape: [5, 9, 13]           # 5 rows × 9 cols × 13 channels
-    channels:
-      - "plant_type"
-      - "plant_hp"
-      - "plant_function"
-      - "zombie_density"
-      - "zombie_hp"
-      - "zombie_threat"
-      - "zombie_urgency"
-      - "zombie_status"
-      - "bullet_density"
-      - "bullet_threat"
-      - "dps_heatmap"
-      - "threat_heatmap"
-      - "kill_heatmap"
 
   global:
-    features:
-      - "sun"
-      - "sun_producing"
-      - "wave"
-      - "total_waves"
-      - "wave_countdown"
-      - "game_clock"
-      - "zombie_count"
-      - "zombie_total_hp"
-      - "plant_count"
-      - "lawnmower_status"
-      - "cards_cd_ratio"
-      - "cards_affordable"
-      - "row_threat"
-      - "row_defense"
-      - "huge_wave_countdown"
-      - "zombie_refresh_hp"
-      - "ice_trails"
-      - "next_wave_preview"
-    total_dim: 65               # 5 + 1+1+1+1+1+1+1+1 + 5 + 10 + 10 + 5 + 5 + 1 + 1 + 5 + 10
+    total_dim: 61               # actual dims filled by _build_global_features()
 
   card_attributes:
     shape: [10, 7]
 
 # =============================================================================
-# Reward — sparse zombie-kill-only rewards matching paper Table 5
-# All reward values are scaled down compared to original config for stability
+# Reward — hardcoded zombie_damage (zombie HP reduction per step).
+#
+# All auxiliary rewards are disabled because rewards.use_shaped is not set.
+# These 4 keys are read directly in step() and default to non-zero — force to 0.
 # =============================================================================
 rewards:
-  # Zombie kill rewards (sparse signal — matches paper Table 5)
-  zombie_kill:
-    use_type_rewards: true
-    default: 0.3                # Fallback for unlisted zombie types
-    zombie: 0.2                 # Basic Zombie
-    flag: 0.2
-    conehead: 0.3               # Conehead Zombie
-    polevaulter: 0.5            # Pole Vaulter Zombie
-    buckethead: 0.6             # Buckethead Zombie
-    newspaper: 0.3
-    screendoor: 0.6
-    football: 0.8               # Football Zombie
-    dancing: 0.5
-    backup: 0.2
-    duckytube: 0.2
-    snorkel: 0.4
-    bobsled: 0.4
-    dolphin: 0.5
-    jackinbox: 0.5
-    pogo: 0.5
-    yeti: 0.8
-    catapult: 0.7
-    imp: 0.2
-
-  # Hardcoded reward components — explicitly zero for sparse baseline
-  coverage:
-    scale: 0.0                   # row-coverage bonus
-  proximity:
-    scale: 0.0                   # zombie-proximity penalty
-
-  # All auxiliary rewards set to 0 for clean sparse baseline
-  sun_collect: 0.0
-  wave_complete: 0.0
-  game_win: 0.0
-  streak_bonus: 0.0
-  survival_per_step: 0.0
-  plant_sunflower: 0.0
-  plant_attacker: 0.0
-  plant_wall: 0.0
-  plant_lilypad: 0.0
-  plant_pumpkin: 0.0
-  plant_other: 0.0
-  plant_lost: 0.0
-  sunflower_lost: 0.0
-  lawnmower_triggered: 0.0
-  game_lose: 0.0
-  invalid_action: 0.0
-  wait_with_sun: 0.0
-
-  # Potential-based shaping: disabled for clean baseline
-  potential:
-    delta_scale: 0.0
+  invalid_action: 0.0          # default -0.01
+  wait_with_sun: 0.0           # default -0.02
+  game_win: 0.0                # default +3.0
+  game_lose: 0.0               # default -3.0
 
 # =============================================================================
-# Training Configuration
+# Training Configuration  (same as baseline except batch/buffer/frameskip)
 # =============================================================================
 training:
   args:
@@ -216,31 +147,30 @@ training:
     game_path: "gameobj/PlantsVsZombies.exe"
     wait_time: 3.0
     speed: 10.0
-    frameskip: 24               # matches paper: ~4-5 decisions per in-game second
-    auto_resume: true
+    frameskip: 49               # DEBUG: 1 step ≈ 1 sec game time (baseline: 24)
+    auto_resume: false
     env_console_log_level: 0
     file_log_level: 1
     execution: "async_worker_pool"
     curriculum: "none"
 
   ddqn:
-    ddqn_episodes: 10000        # paper: 10,000 episodes
-    ddqn_gamma: 0.99            # paper spec
-    ddqn_batch_size: 32         # paper spec
-    ddqn_buffer_size: 50000     # paper spec
-    ddqn_burn_in: 10000         # paper spec
-    ddqn_lr: 0.001              # paper spec
+    ddqn_episodes: 10000        # same as baseline
+    ddqn_gamma: 0.99            # same as baseline
+    ddqn_batch_size: 512        # DEBUG: larger batch (baseline: 32)
+    ddqn_buffer_size: 100000    # DEBUG: larger buffer (baseline: 50000)
+    ddqn_burn_in: 10000         # same as baseline
+    ddqn_lr: 0.0001              # same as baseline
     ddqn_update_freq: 32
-    ddqn_sync_freq: 2000        # paper spec: target sync every 2000 steps
+    ddqn_sync_freq: 2000        # same as baseline
     ddqn_checkpoint_freq: 500
     ddqn_plot_freq: 50
     ddqn_plot_path: null
     ddqn_save_path: null
     ddqn_load_path: null
 
-    # Paper network architecture: 2 hidden layers of 2048 each
+    # Paper network architecture: 2 hidden layers of 2048 each  (same as baseline)
     ddqn_hidden_sizes: [2048, 2048]
 
   env:
     max_steps: 10000
-    normalize_obs: true

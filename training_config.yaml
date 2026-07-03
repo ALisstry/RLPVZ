@@ -1,355 +1,145 @@
-# PVZ AI 训练配置
-# Survival Day Curriculum - 生存白天课程学习
+# PVZ AI Baseline Training Configuration
+# Dense reward: zombie HP reduction per step (zombie_damage).
+# MLP architecture: 596 → 2048 → 2048 → 451.
+#
+# This is the primary baseline. All baseline_* variants share the same reward
+# and differ only in network architecture.
+#
+# Usage:
+#   .\.venv\Scripts\python.exe train.py --training_config training_config.yaml
 
 # =============================================================================
-# 游戏设置
+# Game Settings — Survival: Day  (same as baseline)
 # =============================================================================
 game:
-  mode: "survival_day_endless"  # 游戏模式: 生存模式(白天无尽)
-  game_mode_id: 11              # mode 11 = 生存白天无尽
-  background_type: 0            # BACKGROUND_1_DAY
-  map: "day"                    # 地图类型: 白天 (5行)
-  rows: 5                       # 行数 (白天5行)
-  cols: 9                       # 列数
-  initial_sun: 50               # 初始阳光
-  win_condition: "survival_sublevels"
-  target_sublevels: 3
+  game_mode_id: 6                # GAMEMODE_SURVIVAL_HARD_DAY = 生存白天(困难)
+  rows: 5                        # 5 rows
+  cols: 9                        # 9 columns
+  initial_sun: 50
 
 # =============================================================================
-# 卡槽配置 (10张卡)
+# Card Loadout — exactly matching paper Table 4  (same as baseline)
 # =============================================================================
 cards:
-  slot_count: 10                # 卡槽数量
-  
+  slot_count: 10
+
   plants:
-    # 白天课程学习最终卡组
-    
-    # 卡槽0: 向日葵 (经济基础)
+    # Slot 0: Sunflower (economy)
     - slot: 0
       id: 1
       name: "Sunflower"
       cost: 50
-      
-    # 卡槽1: 豌豆射手 (首波输出)
+
+    # Slot 1: Peashooter (basic offense)
     - slot: 1
       id: 0
       name: "Peashooter"
       cost: 100
-      
-    # 卡槽2: 寒冰射手 (控制)
+
+    # Slot 2: Potato Mine (trap)
     - slot: 2
-      id: 5
-      name: "Snow Pea"
-      cost: 175
-      
-    # 卡槽3: 双发射手 (主力输出)
+      id: 4
+      name: "Potato Mine"
+      cost: 25
+
+    # Slot 3: Wall-nut (defense)
     - slot: 3
-      id: 7
-      name: "Repeater"
-      cost: 200
-      
-    # 卡槽4: 坚果墙 (防御)
-    - slot: 4
       id: 3
       name: "Wall-nut"
       cost: 50
-      
-    # 卡槽5: 窝瓜 (应急)
+
+    # Slot 4: Repeater (double damage)
+    - slot: 4
+      id: 7
+      name: "Repeater"
+      cost: 200
+
+    # Slot 5: Squash (instant kill)
     - slot: 5
       id: 17
       name: "Squash"
       cost: 50
-      is_instant: true
-      
-    # 卡槽6: 樱桃炸弹 (清场)
+
+    # Slot 6: Cherry Bomb (AOE instant)
     - slot: 6
       id: 2
       name: "Cherry Bomb"
       cost: 150
-      is_instant: true
-      
-    # 卡槽7: 地刺 (地面持续伤害)
+
+    # Slot 7: Snow Pea (slow)
     - slot: 7
-      id: 21
-      name: "Spikeweed"
-      cost: 100
-      
-    # 卡槽8: 玉米投手 (控制/中期过渡)
+      id: 5
+      name: "Snow Pea"
+      cost: 175
+
+    # Slot 8: Melon-pult (AOE damage)
     - slot: 8
-      id: 34
-      name: "Kernel-pult"
-      cost: 100
-      
-    # 卡槽9: 西瓜投手 (后期AOE)
-    - slot: 9
       id: 39
       name: "Melon-pult"
       cost: 300
 
+    # Slot 9: Spikeweed (ground trap)
+    - slot: 9
+      id: 21
+      name: "Spikeweed"
+      cost: 100
+
 # =============================================================================
-# 动作空间
+# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451  (same as baseline)
 # =============================================================================
 action_space:
-  type: "discrete"
-  # 10张卡 × 45格 (5行×9列) + 等待
-  # = 450 + 1 = 451 动作
-  # 当前环境实现禁用铲子动作，避免动作空间和 mask 不一致。
   size: 451
-  
+
   structure:
-    plant_actions: 450          # 种植动作 (10卡 × 45格)
-    shovel_actions: 0           # 当前禁用铲除动作
-    wait_action: 1              # 等待动作
+    plant_actions: 450          # 10 cards × 45 cells
+    shovel_actions: 0           # disabled
+    wait_action: 1
 
 # =============================================================================
-# 观测空间 (增强版 - 利用完整内存数据)
+# Observation Space — Paper-format 596-dim flat vector
+#
+# DDQN adapter (ddqn_paper_observation=true) extracts from 13-ch grid:
+#   sun count           :  1 dim
+#   card cooldowns      : 10 dim
+#   plant type one-hot  : 5×9×(10+1) = 495 dim  (card-slot one-hot, not plant-id)
+#   plant HP grid       : 5×9 = 45 dim
+#   zombie HP grid      : 5×9 = 45 dim
+#   ─────────────────────────────────────────────
+#   Total               : 596 dim
+#
+# Grid shape & global total_dim kept for PVZEnv Dict obs init (PPO compat).
+# global_features & card_attributes are ignored by DDQN paper adapter.
 # =============================================================================
 observation_space:
-  # 网格特征 (CNN输入) - 13通道完整版
   grid:
-    shape: [5, 9, 13]           # 5行 × 9列 × 13通道
-    channels:
-      - "plant_type"            # 通道0: 植物类型ID (归一化)
-      - "plant_hp"              # 通道1: 植物血量比例
-      - "plant_function"        # 通道2: 植物功能分类 (0=防御/0.3=经济/0.6=控制/1.0=攻击)
-      - "zombie_density"        # 通道3: 僵尸数量密度
-      - "zombie_hp"             # 通道4: 僵尸血量总和 (含护甲)
-      - "zombie_threat"         # 通道5: 僵尸威胁度 (类型系数)
-      - "zombie_urgency"        # 通道6: 僵尸紧迫度 (基于速度和距离的Time to Impact)
-      - "zombie_status"         # 通道7: 僵尸状态 (冰冻0.5/减速0.3/啃食0.8/魅惑-1.0)
-      - "bullet_density"        # 通道8: 子弹密度
-      - "bullet_threat"         # 通道9: 子弹威胁 (伤害+特效)
-      - "dps_heatmap"           # 通道10: DPS热力图 (火力覆盖)
-      - "threat_heatmap"        # 通道11: 威胁热力图 (僵尸威胁扩散)
-      - "kill_heatmap"          # 通道12: 击杀热力图 (历史击杀位置)
-  
-  # 全局特征 (MLP输入)
-  global:
-    features:
-      - "sun"                   # 当前阳光 (1)
-      - "sun_producing"         # 场上向日葵数量 (1) 
-      - "wave"                  # 当前波数 (1)
-      - "total_waves"           # 总波数 (1)
-      - "wave_countdown"        # 下一波倒计时 (1)
-      - "game_clock"            # 游戏时钟 (1)
-      - "zombie_count"          # 僵尸总数 (1)
-      - "zombie_total_hp"       # 僵尸总血量 (1)
-      - "plant_count"           # 植物总数 (1)
-      - "lawnmower_status"      # 小推车状态 (5) - 每行一个
-      - "cards_cd_ratio"        # 10张卡的CD比例 (10) - 0~1连续值
-      - "cards_affordable"      # 10张卡是否买得起 (10)
-      - "row_threat"            # 每行威胁度 (5) - 僵尸血量加权
-      - "row_defense"           # 每行防御力 (5) - 植物数量和类型
-      - "huge_wave_countdown"   # 大波倒计时 (1)
-      - "zombie_refresh_hp"     # 出怪血量阈值 (1)
-      - "ice_trails"            # 冰道状态 (5) - 每行是否有冰道
-      - "next_wave_preview"     # 下一波出怪预告 (10) - 各类型僵尸数量归一化
-    total_dim: 71               # 61个实际特征 + 10个预留维度
+    shape: [5, 9, 13]           # 5 rows × 9 cols × 13 channels
 
-  # 卡片属性特征 (Embedding输入) - 新增
-  # 形状: [10, 7] (10张卡，每张卡7个属性)
-  # 属性: [Cost, HP, Damage, Range, Cooldown, Role, ProjectileType]
+  global:
+    total_dim: 61               # actual dims filled by _build_global_features()
+
   card_attributes:
     shape: [10, 7]
 
 # =============================================================================
-# 奖励配置 (DDQN 版 - 终局/波次奖励明显高于局部 shaping，但保持同一数量级)
+# Reward — hardcoded zombie_damage (zombie HP reduction per step).
+#
+# All auxiliary rewards are disabled because rewards.use_shaped is not set.
+# These 4 keys are read directly in step() and default to non-zero — force to 0.
 # =============================================================================
 rewards:
-  # 正向奖励 - 先保证局部行为有反馈，再让过波/通关成为主目标
-  zombie_kill:
-    use_type_rewards: true      # true 时按僵尸类型给击杀奖励
-    default: 8.00
-    zombie: 8.00
-    flag: 12.00
-    conehead: 12.00
-    polevaulter: 12.00
-    buckethead: 20.00
-    newspaper: 10.00
-    screendoor: 20.00
-    football: 24.00
-    dancing: 12.00
-    backup: 8.00
-    duckytube: 8.00
-    snorkel: 12.00
-    bobsled: 12.00
-    dolphin: 12.00
-    jackinbox: 12.00
-    pogo: 12.00
-    yeti: 20.00
-    catapult: 16.00
-    imp: 8.00
-
-  sun_collect: 0.0              # 关闭阳光奖励，避免经济 shaping 干扰主目标
-  wave_complete: 4.0            # 完成一波，是最稳定的阶段性奖励。注意这里算上了小波
-  game_win: 50.0                # 通关奖励，明显高于单次行为奖励
-  streak_bonus: 0.0             # 禁用跨 episode 连胜奖励，避免 DDQN 目标非平稳
-  survival_per_step: 0.0        # 不给纯苟活奖励
-
-  # 种植奖励 - 只做弱引导，避免代理学成“只要下卡就赚”
-  plant_sunflower: 0.10
-  plant_attacker: 0.35
-  plant_wall: 0.18
-  plant_lilypad: 0.10
-  plant_pumpkin: 0.18
-  plant_other: 0.30
-
-  # 负向惩罚 - 失败要疼，但不能大到淹没全过程信号
-  plant_lost: -0.25
-  sunflower_lost: -0.80
-  lawnmower_triggered: -50.0
-  game_lose: -6.0
-  invalid_action: -0.01
-  wait_with_sun: -0.02        # 阳光充足时等待，弱惩罚纯等待
-
-  coverage:
-    scale: 0.0                # 显式关闭行覆盖即时奖励，避免和 potential 重复
-  proximity:
-    scale: 0.0                # 显式关闭近家僵尸即时惩罚，主要由 potential 处理威胁
-
-  potential:
-    sun_scale: 0.06
-    sun_cap: 300.0
-    plant_scale: 0.22
-    spread_bonus: 0.06
-    lawnmower_scale: 0.35
-    zombie_threat_scale: 0.35
-    zombie_distance_bonus: 0.75
-    wave_scale: 0.05
-    delta_scale: 0.18
+  invalid_action: 0.0          # default -0.01
+  wait_with_sun: 0.0           # default -0.02
+  game_win: 0.0                # default +3.0
+  game_lose: 0.0               # default -3.0
 
 # =============================================================================
-# 课程学习配置
-# =============================================================================
-# training.args.curriculum 默认使用 "stage_gate"。
-# 直接运行: .\.venv\Scripts\python.exe train.py
-curriculum:
-  stage_gate:
-    stages:
-      # 达到 min_episodes && mean_reward_threshold && mean_success_rate_threshold 后升阶。
-      - stage_name: "combat_day_normal_pea"
-        game_mode_id: 1
-        level: null
-        rows: 5
-        cols: 9
-        enabled_rows: [0, 1, 2]
-        enabled_plants: [0]
-        initial_sun: 450
-        win_condition: "level_end"
-        target_sublevels: 1
-        min_episodes: 30
-        mean_reward_threshold: 22.0
-        mean_success_rate_threshold: 0.80
-      
-      - stage_name: "economy_day_normal_sun_pea"
-        game_mode_id: 1
-        level: null
-        rows: 5
-        cols: 9
-        enabled_rows: [0, 1, 2]
-        enabled_plants: [1, 0]
-        initial_sun: 50
-        win_condition: "level_end"
-        target_sublevels: 1
-        min_episodes: 30
-        mean_reward_threshold: 18.0
-        mean_success_rate_threshold: 0.70
-
-      - stage_name: "defense_day_hard_rows"
-        game_mode_id: 6
-        level: null
-        rows: 5
-        cols: 9
-        enabled_rows: [0, 1, 2]
-        enabled_plants: [1, 0, 3]
-        initial_sun: 150
-        win_condition: "level_end"
-        target_sublevels: 1
-        min_episodes: 30
-        mean_reward_threshold: 20.0
-        mean_success_rate_threshold: 0.65
-
-      - stage_name: "defense_day_hard_full_rows"
-        game_mode_id: 6
-        level: null
-        rows: 5
-        cols: 9
-        enabled_rows: [0, 1, 2, 3, 4]
-        enabled_plants: [1, 0, 3, 5]
-        initial_sun: 150
-        win_condition: "level_end"
-        target_sublevels: 1
-        min_episodes: 40
-        mean_reward_threshold: 24.0
-        mean_success_rate_threshold: 0.60
-
-      - stage_name: "endless_day_intro_sublevel1"
-        game_mode_id: 11
-        level: null
-        rows: 5
-        cols: 9
-        enabled_rows: [0, 1, 2, 3, 4]
-        enabled_plants: [1, 0, 3, 5, 7, 17, 2]
-        initial_sun: 150
-        win_condition: "survival_sublevels"
-        target_sublevels: 1
-        min_episodes: 50
-        mean_reward_threshold: 70.0
-        mean_success_rate_threshold: 0.55
-
-      - stage_name: "endless_day_intro_sublevel2"
-        game_mode_id: 11
-        level: null
-        rows: 5
-        cols: 9
-        enabled_rows: [0, 1, 2, 3, 4]
-        enabled_plants: [1, 0, 3, 5, 7, 17, 2]
-        initial_sun: 100
-        win_condition: "survival_sublevels"
-        target_sublevels: 2
-        min_episodes: 60
-        mean_reward_threshold: 95.0
-        mean_success_rate_threshold: 0.50
-
-      - stage_name: "endless_day_full_sublevel2"
-        game_mode_id: 11
-        level: null
-        rows: 5
-        cols: 9
-        enabled_rows: [0, 1, 2, 3, 4]
-        enabled_plants: [1, 0, 5, 7, 3, 17, 2, 21, 34, 39]
-        initial_sun: 50
-        win_condition: "survival_sublevels"
-        target_sublevels: 2
-        min_episodes: 60
-        mean_reward_threshold: 110.0
-        mean_success_rate_threshold: 0.45
-
-      - stage_name: "full_day_endless"
-        game_mode_id: 11
-        level: null
-        rows: 5
-        cols: 9
-        enabled_rows: [0, 1, 2, 3, 4]
-        enabled_plants: [1, 0, 5, 7, 3, 17, 2, 21, 34, 39]
-        initial_sun: 50
-        win_condition: "survival_sublevels"
-        target_sublevels: 3
-
-# =============================================================================
-# 统计窗口配置
-# =============================================================================
-# Stage-gate curriculum 与 DDQN 控制台共用的 recent metrics 窗口。
-metric_window: 30
-
-# =============================================================================
-# 训练配置
+# Training Configuration  (same as baseline except batch/buffer/frameskip)
 # =============================================================================
 training:
   args:
-    algo: "ddqn"                # 默认算法: ppo 或 ddqn
+    algo: "ddqn"
     port: 12345
-    num_envs: 8
+    num_envs: 1
     base_port: 12345
     ports: ""
     pids: ""
@@ -357,58 +147,30 @@ training:
     game_path: "gameobj/PlantsVsZombies.exe"
     wait_time: 3.0
     speed: 10.0
-    frameskip: 4
-    auto_resume: true
+    frameskip: 49               # DEBUG: 1 step ≈ 1 sec game time (baseline: 24)
+    auto_resume: false
     env_console_log_level: 0
     file_log_level: 1
-    execution: "auto"
-    curriculum: "stage_gate"
-
-  eval:
-    enabled: true
-    freq_episodes: 500
-    episodes: 20
-    deterministic: true
-    save_episode_details: true
-    real_num_envs: 1
-    real_base_port: 13000
-  
-  ppo:
-    timesteps: 500000
-    batch: 1024
-    n_steps: 4096
-    n_epochs: 20
-    net: "large"
-    lr: 0.0003
-    start_ent: 0.15
-    end_ent: 0.01
-    ent_decay: "linear"
-    diversify: 0.0
-    no_diversify: true
-    no_failure_priority: false
-    save_freq: 10000
-    ppo_plot_freq: 20
-    ppo_plot_path: null
-    save_path: null
-    load: null
-    no_attn: false
+    execution: "async_worker_pool"
+    curriculum: "none"
 
   ddqn:
-    ddqn_episodes: 200000
-    ddqn_gamma: 0.99
-    ddqn_batch_size: 200
-    ddqn_buffer_size: 100000
-    ddqn_burn_in: 10000
-    ddqn_hidden_sizes: [2048, 1024]
-    ddqn_lr: 0.001
+    ddqn_episodes: 10000        # same as baseline
+    ddqn_gamma: 0.99            # same as baseline
+    ddqn_batch_size: 512        # DEBUG: larger batch (baseline: 32)
+    ddqn_buffer_size: 100000    # DEBUG: larger buffer (baseline: 50000)
+    ddqn_burn_in: 10000         # same as baseline
+    ddqn_lr: 0.0001              # same as baseline
     ddqn_update_freq: 32
-    ddqn_sync_freq: 2000
+    ddqn_sync_freq: 2000        # same as baseline
     ddqn_checkpoint_freq: 500
-    ddqn_plot_freq: 20
+    ddqn_plot_freq: 50
     ddqn_plot_path: null
     ddqn_save_path: null
     ddqn_load_path: null
 
+    # Paper network architecture: 2 hidden layers of 2048 each  (same as baseline)
+    ddqn_hidden_sizes: [2048, 2048]
+
   env:
-    max_steps: 10000            # 最大步数
-    normalize_obs: true         # 归一化观测
+    max_steps: 10000

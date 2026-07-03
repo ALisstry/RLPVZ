@@ -8,6 +8,7 @@ from .game_instances import (
 )
 from .logging import setup_logging
 from .paths import build_run_paths
+from .game_instances import prepare_game_instances, terminate_pvz_processes
 from utils.train_utils import (
     load_training_config,
     print_metadata,
