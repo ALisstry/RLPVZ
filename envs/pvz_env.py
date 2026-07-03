@@ -1503,7 +1503,23 @@ class PVZEnv(gym.Env):
             reward += r_lost
             self.plants_lost += abs(plant_diff)
             details['plant_lost'] = r_lost
-            
+
+            # 按阳光成本惩罚丢失的植物（植物被吃时扣除其阳光花费）
+            sun_cost_scale = self.rewards.get('plant_lost_sun_cost_scale', 0.0)
+            if sun_cost_scale != 0.0 and self._cached_game_state is not None:
+                prev_active = [
+                    p for p in self._cached_game_state.plants
+                    if self._is_curriculum_cell_enabled(p.row, p.col)
+                ]
+                curr_ids = {p.index for p in active_plants}
+                lost = [p for p in prev_active if p.index not in curr_ids]
+                if lost:
+                    r_sun_lost = sum(
+                        PLANT_COST.get(p.type, 50) for p in lost
+                    ) * sun_cost_scale * (-1.0)
+                    reward += r_sun_lost
+                    details['plant_sun_cost_lost'] = r_sun_lost
+
             current_sunflowers = sum(1 for p in active_plants if p.type == PlantType.SUNFLOWER)
             sunflower_lost = self.sunflower_count - current_sunflowers
             if sunflower_lost > 0:

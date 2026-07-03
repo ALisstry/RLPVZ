@@ -51,25 +51,27 @@ def build_run_paths(args) -> RunPaths:
     config_name = _resolve_config_name(args)
     output_dir = get_model_output_dir(algo, config_name)
     run_id = _resolve_run_id(args, output_dir)
-    run_dir = os.path.join(output_dir, "runs", run_id)
+    run_dir = os.path.join(output_dir, run_id)
+    model_dir = os.path.join(run_dir, "model")
+    metrics_dir = os.path.join(run_dir, "metrics")
+    logs_dir = os.path.join(run_dir, "logs")
     registration = get_algorithm_registration(algo)
     cached_model_path = os.path.join(
-        run_dir, f"latest_model{registration.model_extension}"
+        model_dir, f"latest_model{registration.model_extension}",
     )
-    log_dir = "logs"
     return RunPaths(
         algo=algo,
         run_id=run_id,
         output_dir=output_dir,
         run_dir=run_dir,
         cached_model_path=cached_model_path,
-        metrics_path=os.path.join(run_dir, "metrics.jsonl"),
-        metrics_csv_path=os.path.join(run_dir, "metrics.csv"),
-        metrics_snapshot_path=os.path.join(run_dir, "metrics_snapshot.json"),
-        training_curve_path=os.path.join(run_dir, "training_curve.png"),
-        heatmap_path=os.path.join(run_dir, "heatmap.html"),
-        log_dir=log_dir,
-        log_file_path=os.path.join(log_dir, f"training_{run_id}.log"),
+        metrics_path=os.path.join(metrics_dir, "metrics.jsonl"),
+        metrics_csv_path=os.path.join(metrics_dir, "metrics.csv"),
+        metrics_snapshot_path=os.path.join(metrics_dir, "metrics_snapshot.json"),
+        training_curve_path=os.path.join(metrics_dir, "training_curve.png"),
+        heatmap_path=os.path.join(metrics_dir, "heatmap.html"),
+        log_dir=logs_dir,
+        log_file_path=os.path.join(logs_dir, f"training_{run_id}.log"),
     )
 
 
@@ -85,17 +87,16 @@ def _resolve_run_id(args, output_dir: str) -> str:
 
 
 def _find_latest_run_id(output_dir: str) -> str | None:
-    runs_dir = os.path.join(output_dir, "runs")
-    if not os.path.isdir(runs_dir):
+    if not os.path.isdir(output_dir):
         return None
 
     candidates = []
-    for run_id in os.listdir(runs_dir):
-        run_dir = os.path.join(runs_dir, run_id)
+    for run_id in os.listdir(output_dir):
+        run_dir = os.path.join(output_dir, run_id)
         if not os.path.isdir(run_dir):
             continue
-        metadata_path = os.path.join(run_dir, "run_metadata.json")
-        metrics_path = os.path.join(run_dir, "metrics.csv")
+        metadata_path = os.path.join(run_dir, "metrics", "run_metadata.json")
+        metrics_path = os.path.join(run_dir, "metrics", "metrics.csv")
         if not os.path.exists(metadata_path) and not os.path.exists(metrics_path):
             continue
         marker_path = metadata_path if os.path.exists(metadata_path) else metrics_path
@@ -107,13 +108,20 @@ def _find_latest_run_id(output_dir: str) -> str | None:
 
 def get_model_output_dir(algo: str, config_name: str = "") -> str:
     if config_name:
-        return os.path.join("models_output", algo, config_name)
-    return os.path.join("models_output", algo)
+        return os.path.join(algo, config_name)
+    return algo
 
 
-def get_cached_model_path(algo: str, config_name: str = "") -> str:
+def get_cached_model_path(algo: str, config_name: str = "", run_id: str = "") -> str:
     extension = get_algorithm_registration(algo).model_extension
-    return os.path.join(get_model_output_dir(algo, config_name), f"latest_model{extension}")
+    if run_id:
+        return os.path.join(
+            get_model_output_dir(algo, config_name), run_id, "model",
+            f"latest_model{extension}",
+        )
+    return os.path.join(
+        get_model_output_dir(algo, config_name), f"latest_model{extension}",
+    )
 
 
 def build_checkpoint_paths(
@@ -130,12 +138,11 @@ def build_checkpoint_paths(
     )
     tagged_path = None
     if tag:
-        save_dir = (
-            run_paths.run_dir
-            if run_paths is not None
-            else get_model_output_dir(algo)
-        )
-        tagged_path = os.path.join(save_dir, f"{tag}{registration.model_extension}")
+        if run_paths is not None:
+            model_dir = os.path.join(run_paths.run_dir, "model")
+        else:
+            model_dir = get_model_output_dir(algo)
+        tagged_path = os.path.join(model_dir, f"{tag}{registration.model_extension}")
     return CheckpointPaths(
         explicit_path=explicit_path,
         cached_path=cached_path,

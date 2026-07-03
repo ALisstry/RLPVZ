@@ -124,7 +124,7 @@ def _restore_curriculum_state(args, run_paths, curriculum) -> None:
     ):
         return
 
-    metadata_path = os.path.join(run_paths.run_dir, "run_metadata.json")
+    metadata_path = os.path.join(run_paths.run_dir, "metrics", "run_metadata.json")
     if not os.path.exists(metadata_path):
         return
     with open(metadata_path, "r", encoding="utf-8") as file:

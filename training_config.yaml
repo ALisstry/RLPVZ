@@ -128,6 +128,7 @@ observation_space:
 # =============================================================================
 rewards:
   reward_scale: 1              # reward scale
+  plant_lost_sun_cost_scale: 0.0  # 丢失植物按阳光成本惩罚（0=禁用, 1=全额阳光）
   invalid_action: 0.0          # default -0.01
   wait_with_sun: 0.0           # default -0.02
   game_win: 0.0                # default +3.0
