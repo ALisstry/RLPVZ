@@ -52,7 +52,10 @@ def build_run_paths(args) -> RunPaths:
     output_dir = get_model_output_dir(algo, config_name)
     run_id = _resolve_run_id(args, output_dir)
     run_dir = os.path.join(output_dir, "runs", run_id)
-    cached_model_path = get_cached_model_path(algo, config_name)
+    registration = get_algorithm_registration(algo)
+    cached_model_path = os.path.join(
+        run_dir, f"latest_model{registration.model_extension}"
+    )
     log_dir = "logs"
     return RunPaths(
         algo=algo,
@@ -127,12 +130,12 @@ def build_checkpoint_paths(
     )
     tagged_path = None
     if tag:
-        output_dir = (
-            run_paths.output_dir
+        save_dir = (
+            run_paths.run_dir
             if run_paths is not None
             else get_model_output_dir(algo)
         )
-        tagged_path = os.path.join(output_dir, f"{tag}{registration.model_extension}")
+        tagged_path = os.path.join(save_dir, f"{tag}{registration.model_extension}")
     return CheckpointPaths(
         explicit_path=explicit_path,
         cached_path=cached_path,

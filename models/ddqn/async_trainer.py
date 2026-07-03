@@ -279,6 +279,7 @@ class AsyncDDQNTrainer:
                 message["reward"],
                 message["iterations"],
                 bool(message.get("win") is True),
+                message.get("epsilon", 1.0),
             )
             self.metric_emitter.emit_episode(
                 message, episode_stats, self.transition_count

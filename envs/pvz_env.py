@@ -1165,6 +1165,12 @@ class PVZEnv(gym.Env):
                 log_level=2,
             )
         
+        # 奖励缩放（小奖励开关）
+        reward_scale = self.rewards.get('reward_scale', 1.0)
+        if reward_scale != 1.0:
+            reward *= reward_scale
+            step_reward_details = {k: v * reward_scale for k, v in step_reward_details.items()}
+
         self.total_reward += reward
 
         if game_state:

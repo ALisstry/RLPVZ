@@ -127,7 +127,7 @@ observation_space:
 # These 4 keys are read directly in step() and default to non-zero — force to 0.
 # =============================================================================
 rewards:
-  reward_scale: 1              # reward scale
+  reward_scale: 0.01              # 小奖励模式：除以 100
   invalid_action: 0.0          # default -0.01
   wait_with_sun: 0.0           # default -0.02
   game_win: 0.0                # default +3.0

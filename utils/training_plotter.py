@@ -71,6 +71,8 @@ class TrainingCurvePlotter:
             ("grad_norm",     lambda: self._plot_line(
                 grad_norm_values, "Gradient Norm", "#d62728",
                 ylabel="||grad||  (pre-clip)")),
+            ("q_vs_reward",   lambda: self._plot_q_vs_reward(
+                mean_q_values, mean_rewards, episode_rewards)),
         ]
         for name, plot_fn in plots:
             try:
@@ -454,6 +456,61 @@ class TrainingCurvePlotter:
         self._legend_if_available(ax)
         fig.tight_layout()
         fig.savefig(self._derived_path(title.lower().replace(" ", "_")))
+        plt.close(fig)
+
+    def _plot_q_vs_reward(self, mean_q_values, mean_rewards, episode_rewards):
+        """Q-value vs actual reward — diagnostic for overestimation."""
+        plt = self._plt
+        fig, ax1 = plt.subplots(figsize=(10, 4), dpi=120)
+        ax1.set_title("Q-Value vs Reward")
+        ax2 = ax1.twinx()
+
+        has_data = False
+
+        # Left axis: mean Q (per-update, smoothed)
+        if mean_q_values:
+            q_arr = np.asarray(mean_q_values, dtype=np.float64)
+            q_x = np.arange(1, len(q_arr) + 1)
+            # Down-sample for readability: take moving avg with wide window
+            window = max(10, len(q_arr) // 40) if len(q_arr) >= 40 else 1
+            if window > 1:
+                kernel = np.ones(window, dtype=np.float64) / window
+                q_smooth = np.convolve(q_arr, kernel, mode="valid")
+                q_smooth_x = np.arange(window, len(q_arr) + 1)
+                ax1.plot(q_smooth_x, q_smooth, color="#1f77b4", linewidth=2.0,
+                         alpha=0.9, label="mean Q (smoothed)")
+            else:
+                ax1.plot(q_x, q_arr, color="#1f77b4", linewidth=1.0,
+                         alpha=0.7, label="mean Q")
+            ax1.set_ylabel("Q-Value", color="#1f77b4")
+            ax1.tick_params(axis="y", labelcolor="#1f77b4")
+            has_data = True
+
+        # Right axis: mean reward (smoothed line)
+        if mean_rewards:
+            r_arr = np.asarray(mean_rewards, dtype=np.float64)
+            updates_per_ep = len(mean_q_values) / max(1, len(r_arr)) if mean_q_values else 1
+            r_x = np.arange(1, len(r_arr) + 1) * updates_per_ep
+            ax2.plot(r_x, r_arr, color="#ff7f0e", linewidth=2.0,
+                     alpha=0.9, label="mean reward")
+            ax2.set_ylabel("Reward", color="#ff7f0e")
+            ax2.tick_params(axis="y", labelcolor="#ff7f0e")
+            has_data = True
+
+        if not has_data:
+            ax1.text(0.5, 0.5, "No data yet", transform=ax1.transAxes,
+                     ha="center", va="center", fontsize=11)
+
+        ax1.set_xlabel("Update Step  (episode rewards ≈ aligned by avg updates/ep)")
+        ax1.grid(True, alpha=0.3)
+
+        # Combined legend
+        handles1, labels1 = ax1.get_legend_handles_labels()
+        handles2, labels2 = ax2.get_legend_handles_labels()
+        if handles1 or handles2:
+            ax1.legend(handles1 + handles2, labels1 + labels2, loc="upper left")
+        fig.tight_layout()
+        fig.savefig(self._derived_path("q_vs_reward"))
         plt.close(fig)
 
     @staticmethod

@@ -21,16 +21,18 @@ class EpisodeStats:
     mean_success_rate: float
     mean_window_size: int
     mean_window_count: int
+    epsilon: float = 1.0
 
     @property
     def progress_line(self) -> str:
         return (
-            "Episode: {:d} Reward: {:.2f} Iterations: {:.2f} Win: {} | "
+            "Episode: {:d} Reward: {:.2f} Iterations: {:.2f} Win: {} eps={:.3f} | "
             "Mean({:d}/{:d}) Reward: {:.2f} Iterations: {:.2f} WinRate: {:.2f}%".format(
                 self.episode,
                 self.reward,
                 self.iterations,
                 self.success,
+                self.epsilon,
                 self.mean_window_count,
                 self.mean_window_size,
                 self.mean_reward,
@@ -117,7 +119,7 @@ class DDQNTrainingStats:
 
         return stats
 
-    def record_episode(self, reward, iterations, success) -> EpisodeStats:
+    def record_episode(self, reward, iterations, success, epsilon=1.0) -> EpisodeStats:
         self.episode_count += 1
         reward = float(reward)
         iterations = float(iterations)
@@ -156,6 +158,7 @@ class DDQNTrainingStats:
             mean_success_rate=mean_success_rate,
             mean_window_size=self.window,
             mean_window_count=len(recent_rewards),
+            epsilon=float(epsilon),
         )
 
     def record_loss(self, loss_value):
