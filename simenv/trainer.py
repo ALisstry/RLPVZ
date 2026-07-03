@@ -1,6 +1,7 @@
 """Training loop for the simulation environment."""
 
 import gc
+import csv
 import os
 import signal
 from datetime import datetime
@@ -9,6 +10,8 @@ import torch
 from copy import deepcopy
 
 from simenv import SimPVZEnv
+from simenv.config import CURRICULUM
+from simenv.curriculum import build_curriculum
 from simenv.pvz_sim import config
 from simenv.model import (
     ReplayBuffer, DDQNNetwork, transform_observation, calculate_loss,
@@ -43,13 +46,13 @@ def train_sim(
     max_episodes=100000,
     buffer_size=100000,
     burn_in=10000,
-    batch_size=200,
+    batch_size=512,
     gamma=0.99,
-    lr=1e-3,
-    network_update_freq=32,
-    network_sync_freq=2000,
+    lr=3e-4,
+    network_update_freq=64,
+    network_sync_freq=5000,
     save_path=None,
-    eval_episodes=20,
+    eval_episodes=100,
     eval_freq_episodes=2500,
     visualize=False,
     plot_freq=100,
@@ -77,6 +80,13 @@ def train_sim(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     env = SimPVZEnv()
+    curriculum = build_curriculum(
+        CURRICULUM,
+        rows=env.rows,
+        plant_ids=env.card_plant_ids,
+    )
+    if getattr(curriculum, "enabled", True):
+        env.apply_stage(curriculum.current_stage)
     network = DDQNNetwork(env, learning_rate=lr, device=device)
     target_network = deepcopy(network)
     buffer = ReplayBuffer(memory_size=buffer_size, burn_in=burn_in)
@@ -101,6 +111,8 @@ def train_sim(
         eval_episodes=eval_episodes,
         eval_freq_episodes=eval_freq_episodes,
         epsilon_decay=f"{threshold.start_epsilon} -> {threshold.end_epsilon} (exponential)",
+        curriculum_enabled=getattr(curriculum, "enabled", False),
+        curriculum_stage=curriculum.current_stage_name,
         env_config={
             "rows": config.N_LANES,
             "cols": config.LANE_LENGTH,
@@ -117,6 +129,7 @@ def train_sim(
     step_count = 0
     window = 100
     last_eval_episode = None
+    curriculum_completed_printed = False
     saved_on_interrupt = False
     stop_requested = False
     previous_sigint_handler = signal.getsignal(signal.SIGINT)
@@ -139,41 +152,33 @@ def train_sim(
 
     signal.signal(signal.SIGINT, _handle_interrupt)
 
-    print(f"Burn-in ({burn_in} steps)...")
-    s_0 = transform_observation(env.reset())
-    while buffer.burn_in_capacity() < 1 and not stop_requested:
-        mask = np.array(env.mask_available_actions())
-        if np.random.random() < 0.5:
-            action = env.wait_action
-        else:
-            action = np.random.choice(np.arange(env.action_space.n)[mask])
-        s_1, reward, done, _ = env.step(action)
-        s_1 = transform_observation(s_1)
-        next_mask = np.array(env.mask_available_actions())
-        buffer.append(s_0, action, reward, done, s_1, mask, next_mask)
-        s_0 = s_1.copy()
-        if done:
-            s_0 = transform_observation(env.reset())
-        step_count += 1
-    if stop_requested:
+    s_0, step_count, stopped = _burn_in_stage(
+        env,
+        buffer,
+        step_count=step_count,
+        stage_name=curriculum.current_stage_name,
+        stop_requested=lambda: stop_requested,
+    )
+    if stopped:
         print(f"Training stopped during burn-in at {step_count} steps.")
         signal.signal(signal.SIGINT, previous_sigint_handler)
         return
-    print(f"Burn-in done. Buffer: {len(buffer.replay_memory)}  "
-          f"(steps so far: {step_count})")
 
     ep = 0
-    s_0 = transform_observation(env.reset())
     print(f"Training {max_episodes} episodes...")
 
     while ep < max_episodes and not stop_requested:
         rewards = 0
         done = False
+        info = {}
         while not done and not stop_requested:
-            epsilon = threshold.epsilon(ep)
+            if getattr(curriculum, "enabled", False):
+                epsilon = curriculum.epsilon()
+            else:
+                epsilon = threshold.epsilon(ep)
             mask = np.array(env.mask_available_actions())
             action = network.decide_action(s_0, mask, epsilon=epsilon)
-            s_1, r, done, _ = env.step(action)
+            s_1, r, done, info = env.step(action)
             s_1 = transform_observation(s_1)
             next_mask = np.array(env.mask_available_actions())
             rewards += r
@@ -195,10 +200,56 @@ def train_sim(
             if done:
                 ep += 1
                 training_rewards.append(rewards)
-                training_iterations.append(min(config.MAX_FRAMES, env._scene._chrono))
+                training_iterations.append(float(info.get("steps", env._scene._chrono)))
                 if update_loss:
                     training_loss.append(np.mean(update_loss))
                 update_loss = []
+
+                old_stage = curriculum.current_stage_name
+                curriculum.record_episode()
+                stage_changed = False
+
+                if _should_run_eval(ep, curriculum, eval_config, eval_scheduler):
+                    eval_result = _run_and_save_eval(
+                        network,
+                        eval_writer,
+                        eval_config,
+                        best_eval_checkpoint=(
+                            best_eval_checkpoint
+                            if _should_save_best(curriculum)
+                            else None
+                        ),
+                        episode=ep,
+                        step=step_count,
+                        stage=curriculum.current_stage,
+                    )
+                    last_eval_episode = ep
+                    if (
+                        getattr(curriculum, "enabled", False)
+                        and eval_result is not None
+                    ):
+                        stage_changed = curriculum.advance(eval_result)
+                        if stage_changed:
+                            new_stage = curriculum.current_stage_name
+                            print(f"[Curriculum] stage changed: {old_stage} -> {new_stage}")
+                            _append_curriculum_event(
+                                output_dir,
+                                ep,
+                                old_stage,
+                                new_stage,
+                                eval_result,
+                            )
+                            last_eval_episode = None
+                if (
+                    getattr(curriculum, "enabled", False)
+                    and curriculum.completed
+                    and not curriculum_completed_printed
+                ):
+                    curriculum_completed_printed = True
+                    print(
+                        f"[Curriculum] completed at episode={ep} "
+                        f"stage_episode={curriculum.stage_episode}"
+                    )
 
                 if ep % 100 == 0:
                     gc.collect()
@@ -206,19 +257,10 @@ def train_sim(
                     mean_i = np.mean(training_iterations[-window:])
                     mean_l = np.mean(training_loss[-window:]) if training_loss else 0
                     print(f"Episode {ep:5d}/{max_episodes}  "
+                          f"Stage {curriculum.current_stage_name}  "
+                          f"stage_episode={curriculum.stage_episode}  "
                           f"Steps {step_count:7d}  "
                           f"Mean R {mean_r:8.2f}  Mean I {mean_i:.2f}  Mean L {mean_l:.2f}")
-
-                if eval_scheduler.should_run(ep):
-                    _run_and_save_eval(
-                        network,
-                        eval_writer,
-                        eval_config,
-                        best_eval_checkpoint=best_eval_checkpoint,
-                        episode=ep,
-                        step=step_count,
-                    )
-                    last_eval_episode = ep
 
                 if plot_freq and ep % plot_freq == 0:
                     _save_training_artifacts(
@@ -233,7 +275,25 @@ def train_sim(
                     print(f"\nEpisode limit reached ({max_episodes} episodes, {step_count} steps).")
                     break
 
-                s_0 = transform_observation(env.reset())
+                if stage_changed:
+                    env.apply_stage(curriculum.current_stage)
+                    target_network.load_state_dict(network.state_dict())
+                    stage_burn_in = _stage_burn_in(curriculum.current_stage, burn_in)
+                    buffer = ReplayBuffer(
+                        memory_size=buffer_size,
+                        burn_in=stage_burn_in,
+                    )
+                    s_0, step_count, stopped = _burn_in_stage(
+                        env,
+                        buffer,
+                        step_count=step_count,
+                        stage_name=curriculum.current_stage_name,
+                        stop_requested=lambda: stop_requested,
+                    )
+                    if stopped:
+                        break
+                else:
+                    s_0 = transform_observation(env.reset())
 
     if stop_requested:
         print(f"Training stopped at episode {ep}, step {step_count}.")
@@ -255,9 +315,14 @@ def train_sim(
             network,
             eval_writer,
             eval_config,
-            best_eval_checkpoint=best_eval_checkpoint,
+            best_eval_checkpoint=(
+                best_eval_checkpoint
+                if _should_save_best(curriculum)
+                else None
+            ),
             episode=ep,
             step=step_count,
+            stage=curriculum.current_stage,
             force=True,
         )
         _save_training_artifacts(
@@ -293,6 +358,8 @@ def _print_config(**cfg):
     print(f"  {'Epsilon decay:':24s} {cfg['epsilon_decay']}")
     print(f"  {'Eval episodes:':24s} {cfg['eval_episodes']}")
     print(f"  {'Eval frequency:':24s} {cfg['eval_freq_episodes']} episodes")
+    print(f"  {'Curriculum:':24s} {cfg['curriculum_enabled']}")
+    print(f"  {'Curriculum stage:':24s} {cfg['curriculum_stage']}")
     print(f"{sep}")
     ec = cfg["env_config"]
     print(f"  Environment")
@@ -302,6 +369,83 @@ def _print_config(**cfg):
     print(f"  {'Max frames:':24s} {ec['max_frames']} ({ec['max_frames'] // ec['fps']}s game time)")
     print(f"  {'Plant deck:':24s} {', '.join(ec['plants'])}")
     print(f"{sep}\n")
+
+
+def _burn_in_stage(env, buffer, *, step_count, stage_name, stop_requested):
+    print(f"Burn-in ({buffer.burn_in} steps, stage={stage_name})...")
+    state = transform_observation(env.reset())
+    while buffer.burn_in_capacity() < 1 and not stop_requested():
+        mask = np.array(env.mask_available_actions())
+        if np.random.random() < 0.5:
+            action = env.wait_action
+        else:
+            action = np.random.choice(np.arange(env.action_space.n)[mask])
+        next_state, reward, done, _ = env.step(action)
+        next_state = transform_observation(next_state)
+        next_mask = np.array(env.mask_available_actions())
+        buffer.append(state, action, reward, done, next_state, mask, next_mask)
+        state = next_state.copy()
+        if done:
+            state = transform_observation(env.reset())
+        step_count += 1
+    print(f"Burn-in done. Buffer: {len(buffer.replay_memory)}  "
+          f"(steps so far: {step_count})")
+    return state, step_count, bool(stop_requested())
+
+
+def _stage_burn_in(stage, fallback):
+    value = getattr(stage, "burn_in", None)
+    if value is None:
+        return max(1, int(fallback))
+    return max(1, int(value))
+
+
+def _should_run_eval(ep, curriculum, eval_config, eval_scheduler):
+    if not getattr(curriculum, "enabled", False):
+        return eval_scheduler.should_run(ep)
+    if not eval_config.enabled:
+        return False
+    freq = int(eval_config.freq_episodes)
+    return (
+        freq > 0
+        and curriculum.stage_episode > 0
+        and curriculum.stage_episode % freq == 0
+    )
+
+
+def _append_curriculum_event(output_dir, episode, old_stage, new_stage, eval_result):
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "sim_curriculum_events.csv")
+    has_header = os.path.exists(path) and os.path.getsize(path) > 0
+    with open(path, "a", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "episode",
+                "from_stage",
+                "to_stage",
+                "eval_id",
+                "reward_mean",
+                "win_rate",
+            ],
+        )
+        if not has_header:
+            writer.writeheader()
+        writer.writerow({
+            "episode": int(episode),
+            "from_stage": old_stage,
+            "to_stage": new_stage,
+            "eval_id": eval_result.eval_id,
+            "reward_mean": float(eval_result.reward_mean),
+            "win_rate": float(eval_result.win_rate),
+        })
+
+
+def _should_save_best(curriculum):
+    return (
+        not getattr(curriculum, "enabled", False)
+        or bool(getattr(curriculum, "is_final_stage", False))
+    )
 
 
 def _save_training_checkpoint(
@@ -354,12 +498,13 @@ def _run_and_save_eval(
     best_eval_checkpoint=None,
     episode=None,
     step=None,
+    stage=None,
     force=False,
 ):
     if not force and not eval_config.enabled:
         return None
     result = _evaluate(network, n_episodes=eval_config.episodes,
-                       episode=episode, step=step)
+                       episode=episode, step=step, stage=stage)
     eval_writer.write(result)
     if best_eval_checkpoint is not None:
         saved_path = best_eval_checkpoint.maybe_save(
@@ -371,7 +516,7 @@ def _run_and_save_eval(
     return result
 
 
-def _evaluate(network, n_episodes=20, episode=None, step=None):
+def _evaluate(network, n_episodes=20, episode=None, step=None, stage=None):
     """Run N independent sim episodes with greedy policy."""
     sep = "-" * 58
     print(f"\n{sep}")
@@ -380,9 +525,19 @@ def _evaluate(network, n_episodes=20, episode=None, step=None):
 
     eval_id = new_eval_id("sim_ddqn")
     start_time = time_eval_run()
-    eval_env = SimPVZEnv()
+    eval_env = SimPVZEnv(stage=stage)
     details = []
-    max_frames = config.MAX_FRAMES
+    max_frames = (
+        int(stage.timeout_frames)
+        if stage is not None
+        else config.MAX_FRAMES
+    )
+    stage_name = stage.stage_name if stage is not None else "sim"
+    target_flag_waves = (
+        int(stage.target_flag_waves)
+        if stage is not None
+        else None
+    )
 
     for index in range(n_episodes):
         state = transform_observation(eval_env.reset())
@@ -403,20 +558,24 @@ def _evaluate(network, n_episodes=20, episode=None, step=None):
             total_reward += reward
             steps += 1
 
-        survival = min(max_frames, eval_env._scene._chrono)
+        survival = float(info.get("steps", min(max_frames, eval_env._scene._chrono)))
         details.append(
             EpisodeEvalResult(
                 eval_id=eval_id,
                 episode_index=index + 1,
                 reward=float(total_reward),
-                survival=float(survival),
-                win=survival >= max_frames,
+                survival=survival,
+                win=bool(info.get("win", survival >= max_frames)),
                 game_ended=True,
                 completed_sublevels=info.get("completed_sublevels"),
                 actions=steps,
                 extra={
                     "max_frames": max_frames,
                     "fps": config.FPS,
+                    "stage_name": info.get("stage_name", stage_name),
+                    "target_frames": info.get("target_frames"),
+                    "target_flag_waves": info.get("target_flag_waves"),
+                    "timeout_frames": info.get("timeout_frames"),
                     "current_wave_index": info.get("current_wave_index"),
                     "is_flag_wave": info.get("is_flag_wave"),
                 },
@@ -430,14 +589,18 @@ def _evaluate(network, n_episodes=20, episode=None, step=None):
         env_kind="sim",
         episode=episode,
         step=step,
-        stage_name="sim",
-        win_condition="max_frames",
-        target_sublevels=None,
+        stage_name=stage_name,
+        win_condition="stage_objective" if stage is not None else "max_frames",
+        target_sublevels=target_flag_waves,
         details=details,
         duration_sec=elapsed_since(start_time),
         extra={
             "max_frames": max_frames,
             "fps": fps,
+            "stage_name": stage_name,
+            "target_frames": getattr(stage, "target_frames", None),
+            "target_flag_waves": target_flag_waves,
+            "timeout_frames": getattr(stage, "timeout_frames", None),
         },
     )
     print(f"  {'Reward:':20s} mean={result.reward_mean:8.2f}  std={result.reward_std:8.2f}  "
@@ -447,7 +610,7 @@ def _evaluate(network, n_episodes=20, episode=None, step=None):
     print(f"  {'Survival (sec):':20s} mean={result.survival_mean / fps:8.2f}  std={result.survival_std / fps:8.2f}  "
           f"min={result.survival_min / fps:8.2f}  max={result.survival_max / fps:8.2f}")
     print(f"  {'Actions taken:':20s} mean={result.actions_mean or 0:8.2f}")
-    print(f"  {'Full survival:':20s} {result.win_count}/{n_episodes} ({100 * result.win_rate:.1f}%)")
+    print(f"  {'Stage wins:':20s} {result.win_count}/{n_episodes} ({100 * result.win_rate:.1f}%)")
     print(f"{sep}\n")
     return result
 

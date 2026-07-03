@@ -36,7 +36,7 @@ class SimPVZEnv:
       [plant_grid(45), zombie_hp_grid(45), plant_availability(4), sun_norm(1)]
     """
 
-    def __init__(self):
+    def __init__(self, stage=None):
         self.card_specs = CARD_SPECS
         self.plant_deck = {
             key: plant_cls
@@ -68,7 +68,21 @@ class SimPVZEnv:
             self._plant_classes[i]: self._plant_names.index(self._implemented_plant_names[i])
             for i in range(len(self._implemented_plant_names))}
 
-        self._scene = Scene(self.plant_deck, WaveZombieSpawner())
+        self._all_rows = tuple(range(self.rows))
+        self._all_plant_ids = tuple(self.card_plant_ids)
+        self.current_stage = None
+        self.stage_name = "sim"
+        self.enabled_rows = set(self._all_rows)
+        self.enabled_plant_ids = set(self._all_plant_ids)
+        self.initial_sun = config.INITIAL_SUN_AMOUNT
+        self.target_frames = config.MAX_FRAMES
+        self.target_flag_waves = 0
+        self.timeout_frames = config.MAX_FRAMES
+        self._uses_stage_objective = False
+        if stage is not None:
+            self.apply_stage(stage)
+
+        self._scene = self._new_scene()
         self._steps = 0
         self._last_mask = None
         self._collect_render = False
@@ -94,8 +108,19 @@ class SimPVZEnv:
     def render_data(self):
         return self._render_data
 
+    def apply_stage(self, stage):
+        self.current_stage = stage
+        self.stage_name = stage.stage_name
+        self.enabled_rows = set(int(row) for row in stage.enabled_rows)
+        self.enabled_plant_ids = set(int(plant) for plant in stage.enabled_plants)
+        self.initial_sun = int(stage.initial_sun)
+        self.target_frames = int(stage.target_frames)
+        self.target_flag_waves = int(stage.target_flag_waves)
+        self.timeout_frames = int(stage.timeout_frames)
+        self._uses_stage_objective = True
+
     def reset(self, **kwargs):
-        self._scene = Scene(self.plant_deck, WaveZombieSpawner())
+        self._scene = self._new_scene()
         self._steps = 0
         self._last_mask = self.mask_available_actions()
         self._last_sun = self._scene.sun
@@ -117,19 +142,19 @@ class SimPVZEnv:
         self._scene.step()
         if self._collect_render:
             self._render_data.append(self._capture_frame())
-        episode_over = self._scene._chrono > config.MAX_FRAMES
-        while (not self._scene.move_available()) and (not episode_over):
+        episode_over, episode_win = self._episode_status()
+        while (not self._move_available()) and (not episode_over):
             self._scene.step()
             if self._collect_render:
                 self._render_data.append(self._capture_frame())
-            episode_over = self._scene._chrono > config.MAX_FRAMES
+            episode_over, episode_win = self._episode_status()
 
-        episode_over = episode_over or (self._scene.lives <= 0)
         reward, details = self._calculate_reward(
             action,
             action_success,
             planted_name,
             episode_over,
+            episode_win,
         )
         state = self._build_state()
         self._last_mask = self.mask_available_actions()
@@ -147,7 +172,11 @@ class SimPVZEnv:
         grid_indices = empty_cells[0] * self.cols + empty_cells[1]
         for plant in available_plants:
             card_idx = self._plant_no[plant.__name__]
+            if self.card_plant_ids[card_idx] not in self.enabled_plant_ids:
+                continue
             for row, col in zip(empty_cells[0], empty_cells[1]):
+                if row not in self.enabled_rows:
+                    continue
                 mask[self.action_index(card_idx, row, col)] = True
         return mask
 
@@ -177,6 +206,8 @@ class SimPVZEnv:
         zombie_hp = np.zeros(self.grid_size, dtype=np.float32)
 
         for plant in self._scene.plants:
+            if plant.lane not in self.enabled_rows:
+                continue
             idx = plant.lane * self.cols + plant.pos
             cls_idx = self._plant_no.get(plant.__class__.__name__, empty_unknown_class)
             plant_onehot[idx, :] = 0.0
@@ -185,6 +216,8 @@ class SimPVZEnv:
             plant_hp[idx] = max(0.0, min(1.0, float(plant.hp) / max_hp))
 
         for zombie in self._scene.zombies:
+            if zombie.lane not in self.enabled_rows:
+                continue
             idx = zombie.lane * self.cols + zombie.pos
             zombie_hp[idx] = min(
                 1.0, zombie_hp[idx] + float(zombie.hp) / ZOMBIE_HP_NORM)
@@ -192,6 +225,8 @@ class SimPVZEnv:
         cooldowns = np.ones(self.num_cards, dtype=np.float32)
         for i, name in enumerate(self._plant_names):
             if name not in self.plant_deck:
+                continue
+            if self.card_plant_ids[i] not in self.enabled_plant_ids:
                 continue
             plant_cls = self.plant_deck[name]
             full_cd = max(1.0, float(plant_cls.COOLDOWN * config.FPS - 1))
@@ -218,6 +253,10 @@ class SimPVZEnv:
         if decoded is None:
             return False, None
         plant_idx, lane, pos = decoded
+        if lane not in self.enabled_rows:
+            return False, None
+        if self.card_plant_ids[plant_idx] not in self.enabled_plant_ids:
+            return False, None
         plant_name = self._plant_names[plant_idx]
         if plant_name not in self.plant_deck:
             return False, None
@@ -227,7 +266,14 @@ class SimPVZEnv:
             return True, plant_name
         return False, None
 
-    def _calculate_reward(self, action, action_success, planted_name, episode_over):
+    def _calculate_reward(
+        self,
+        action,
+        action_success,
+        planted_name,
+        episode_over,
+        episode_win,
+    ):
         reward = 0.0
         details = {}
         current_plants = self._snapshot_plants()
@@ -301,14 +347,14 @@ class SimPVZEnv:
             details["potential_delta"] = r_potential
 
         if episode_over:
-            if self._scene.lives <= 0:
-                r_lose = float(self.rewards.get("game_lose", -12.0))
-                reward += r_lose
-                details["lose"] = r_lose
-            else:
+            if episode_win:
                 r_win = float(self.rewards.get("game_win", 18.0))
                 reward += r_win
                 details["win"] = r_win
+            else:
+                r_lose = float(self.rewards.get("game_lose", -12.0))
+                reward += r_lose
+                details["lose"] = r_lose
 
         self._last_sun = self._scene.sun
         self._last_plants = current_plants
@@ -439,16 +485,59 @@ class SimPVZEnv:
     def _current_wave_index(self):
         return int(getattr(self._scene._zombie_spawner, "wave_index", 0))
 
+    def _new_scene(self):
+        scene = Scene(
+            self.plant_deck,
+            WaveZombieSpawner(enabled_rows=tuple(sorted(self.enabled_rows))),
+        )
+        scene.sun = int(self.initial_sun)
+        return scene
+
+    def _move_available(self):
+        return bool(np.any(self.mask_available_actions()[:self.wait_action]))
+
+    def _episode_status(self):
+        if self._scene.lives <= 0:
+            return True, False
+        if not self._uses_stage_objective:
+            over = self._scene._chrono > config.MAX_FRAMES
+            return over, bool(over)
+
+        if self._stage_win_reached():
+            return True, True
+        if self._scene._chrono >= self.timeout_frames:
+            return True, False
+        return False, False
+
+    def _stage_win_reached(self):
+        return (
+            self._scene._chrono >= self.target_frames
+            and self.completed_flag_waves >= self.target_flag_waves
+        )
+
+    @property
+    def completed_flag_waves(self):
+        spawner = self._scene._zombie_spawner
+        return int(getattr(spawner, "completed_flag_waves", 0))
+
     def _build_info(self, episode_over, reward_details):
         current_wave = self._current_wave_index()
         spawner = self._scene._zombie_spawner
+        _, episode_win = self._episode_status()
         return {
-            "steps": min(config.MAX_FRAMES, self._scene._chrono),
-            "win": bool(episode_over and self._scene.lives > 0),
+            "steps": min(self.timeout_frames, self._scene._chrono),
+            "win": bool(episode_win),
             "game_ended": bool(episode_over),
             "completed_sublevels": int(
-                getattr(spawner, "completed_sublevels", 0)
+                getattr(spawner, "completed_flag_waves", 0)
             ),
+            "completed_flag_waves": int(
+                getattr(spawner, "completed_flag_waves", 0)
+            ),
+            "stage_name": self.stage_name,
+            "target_frames": self.target_frames,
+            "target_flag_waves": self.target_flag_waves,
+            "timeout_frames": self.timeout_frames,
             "current_wave_index": current_wave,
             "is_flag_wave": bool(getattr(spawner, "last_wave_was_flag", False)),
             "zombie_count": len(self._scene.zombies),
