@@ -108,8 +108,8 @@ def _find_latest_run_id(output_dir: str) -> str | None:
 
 def get_model_output_dir(algo: str, config_name: str = "") -> str:
     if config_name:
-        return os.path.join(algo, config_name)
-    return algo
+        return os.path.join("models_output", algo, config_name)
+    return os.path.join("models_output", algo)
 
 
 def get_cached_model_path(algo: str, config_name: str = "", run_id: str = "") -> str:

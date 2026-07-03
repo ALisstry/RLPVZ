@@ -173,7 +173,7 @@ training:
     ddqn_load_path: null
 
     # Paper network architecture: 2 hidden layers of 2048 each  (same as baseline)
-    ddqn_hidden_sizes: [2048, 2048]
+    ddqn_hidden_sizes: [512, 256]
     use_dueling: true             # Dueling DQN 架构 (Wang et al., 2016)
 
   env:
