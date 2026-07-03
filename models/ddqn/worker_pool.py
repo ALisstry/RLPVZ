@@ -3,7 +3,7 @@ import queue
 import numpy as np
 
 from .threshold import Threshold
-from .ddqn import QNetwork
+from .ddqn import QNetwork, DuelingQNetwork
 from training.logging import setup_worker_logging
 from training.worker_pool import AsyncWorkerPool
 
@@ -195,7 +195,9 @@ def ddqn_worker_main(
                 use_factored=use_factored,
             )
         else:
-            network = QNetwork(
+            use_dueling = getattr(args, "use_dueling", False)
+            WorkerNet = DuelingQNetwork if use_dueling else QNetwork
+            network = WorkerNet(
                 env,
                 learning_rate=args.ddqn_lr,
                 device="cpu",

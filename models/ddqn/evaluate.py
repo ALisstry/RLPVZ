@@ -14,7 +14,7 @@ from training.evaluation import (
 )
 
 from .adapter import typed_onehot_state_dim
-from .ddqn import QNetwork
+from .ddqn import QNetwork, DuelingQNetwork
 from .train_entry import _parse_hidden_sizes
 from .worker_pool import build_ddqn_env
 
@@ -264,7 +264,9 @@ def _build_eval_envs(args, instances, env_spec, scenario_spec):
 
 def _build_network(args, env):
     hidden_sizes = _parse_hidden_sizes(getattr(args, "ddqn_hidden_sizes", None))
-    network = QNetwork(
+    use_dueling = getattr(args, "use_dueling", False)
+    EvalNet = DuelingQNetwork if use_dueling else QNetwork
+    network = EvalNet(
         env,
         learning_rate=args.ddqn_lr,
         device="cpu",

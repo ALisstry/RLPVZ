@@ -79,6 +79,80 @@ class QNetwork(nn.Module):
         return self.network(state_t)
 
 
+class DuelingQNetwork(QNetwork):
+    """Dueling DQN (Wang et al., 2016).
+
+    Splits the network into two streams after a shared trunk:
+        V(s)   — state-value stream
+        A(s,a) — advantage stream
+        Q(s,a) = V(s) + A(s,a) - mean(A(s,·))
+    """
+
+    def __init__(self, env, learning_rate=1e-3, device="cpu",
+                 hidden_sizes=None, n_inputs_override=None,
+                 create_optimizer=True):
+        super().__init__(
+            env, learning_rate=learning_rate, device=device,
+            hidden_sizes=hidden_sizes, n_inputs_override=n_inputs_override,
+            create_optimizer=False,  # build manually below
+        )
+        if hidden_sizes is None:
+            hidden_sizes = [256, 128]
+        # Split: trunk = all but last hidden layer; last_h = branching point
+        if len(hidden_sizes) >= 2:
+            trunk_sizes = hidden_sizes[:-1]
+            branch_in = hidden_sizes[-1]
+        else:
+            trunk_sizes = []
+            branch_in = hidden_sizes[0]
+
+        # ── Shared trunk ──
+        trunk_layers = []
+        prev = self.n_inputs
+        for h in trunk_sizes:
+            trunk_layers.append(nn.Linear(prev, h, bias=True))
+            trunk_layers.append(nn.LeakyReLU())
+            prev = h
+        self.trunk = nn.Sequential(*trunk_layers) if trunk_layers else nn.Identity()
+
+        # ── Value head ──
+        self.value_head = nn.Sequential(
+            nn.Linear(prev if trunk_sizes else self.n_inputs, branch_in, bias=True),
+            nn.LeakyReLU(),
+            nn.Linear(branch_in, 1, bias=True),
+        )
+
+        # ── Advantage head ──
+        self.advantage_head = nn.Sequential(
+            nn.Linear(prev if trunk_sizes else self.n_inputs, branch_in, bias=True),
+            nn.LeakyReLU(),
+            nn.Linear(branch_in, self.n_outputs, bias=True),
+        )
+
+        # Replace self.network (from parent) with None so it's not used
+        self.network = None
+
+        if self.device == "cuda":
+            self.to("cuda")
+
+        if create_optimizer:
+            self.optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, self.parameters()),
+                lr=self.learning_rate,
+            )
+
+    def get_qvals(self, state):
+        if isinstance(state, (list, tuple)):
+            state = np.array(state)
+        state_t = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        shared = self.trunk(state_t)
+        value = self.value_head(shared)               # (B, 1)
+        advantage = self.advantage_head(shared)        # (B, n_actions)
+        # Q = V + A - mean(A)  for identifiability
+        qvals = value + advantage - advantage.mean(dim=1, keepdim=True)
+        return qvals
+
+
 class SumTree:
     """Binary sum-tree for O(log N) priority-based sampling.
 
