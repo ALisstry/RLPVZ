@@ -145,11 +145,16 @@ class DuelingQNetwork(QNetwork):
         if isinstance(state, (list, tuple)):
             state = np.array(state)
         state_t = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        single = state_t.dim() == 1
+        if single:
+            state_t = state_t.unsqueeze(0)            # (D,) → (1, D)
         shared = self.trunk(state_t)
         value = self.value_head(shared)               # (B, 1)
         advantage = self.advantage_head(shared)        # (B, n_actions)
         # Q = V + A - mean(A)  for identifiability
         qvals = value + advantage - advantage.mean(dim=1, keepdim=True)
+        if single:
+            qvals = qvals.squeeze(0)                  # (1, A) → (A,)
         return qvals
 
 
