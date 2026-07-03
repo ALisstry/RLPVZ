@@ -18,7 +18,12 @@ def plot_training(save_path, rewards, iterations, loss):
     import numpy as np
 
     output_path = save_path.replace(".pt", "_training.png")
-    eval_path = os.path.join(os.path.dirname(save_path), "eval.csv")
+    output_dir = os.path.dirname(save_path)
+    eval_path = os.path.join(output_dir, "eval.csv")
+    curriculum_events_path = os.path.join(
+        output_dir,
+        "sim_curriculum_events.csv",
+    )
     if len(rewards) == 0:
         return
 
@@ -47,6 +52,17 @@ def plot_training(save_path, rewards, iterations, loss):
                 eval_episodes.append(int(float(episode)))
                 eval_rewards.append(float(reward))
                 eval_survivals.append(float(survival))
+
+    stage_events = []
+    if os.path.isfile(curriculum_events_path):
+        with open(curriculum_events_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                episode = row.get("episode")
+                to_stage = row.get("to_stage")
+                if not episode or not to_stage:
+                    continue
+                stage_events.append((int(float(episode)), to_stage))
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=False)
 
@@ -97,6 +113,31 @@ def plot_training(save_path, rewards, iterations, loss):
     axes[2].set_ylabel("Loss")
     axes[2].grid(True, alpha=0.3)
 
+    if stage_events:
+        for index, (episode, stage_name) in enumerate(stage_events):
+            for ax in axes:
+                ax.axvline(
+                    episode,
+                    color="tab:red",
+                    linestyle="--",
+                    linewidth=1.0,
+                    alpha=0.7,
+                    label="stage change" if index == 0 and ax is axes[0] else None,
+                )
+            axes[0].text(
+                episode,
+                axes[0].get_ylim()[1],
+                stage_name,
+                rotation=90,
+                va="top",
+                ha="right",
+                fontsize=7,
+                color="tab:red",
+            )
+        handles, labels = axes[0].get_legend_handles_labels()
+        if handles:
+            axes[0].legend(handles, labels)
+
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=140)
@@ -112,8 +153,12 @@ if __name__ == "__main__":
     from simenv.trainer import train_sim
     train_sim(
         max_episodes=100000,
-        buffer_size=50000,
+        buffer_size=100000,
         burn_in=10000,
-        batch_size=200,
+        batch_size=512,
+        lr=3e-4,
+        network_update_freq=64,
+        network_sync_freq=5000,
+        eval_episodes=100,
         plot_callback=plot_training,
     )

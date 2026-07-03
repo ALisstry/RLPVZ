@@ -14,15 +14,27 @@ FLAG_WAVE_FOLLOWUP_INTERVAL = ZOMBIE_SPAWN["flag_wave_followup_interval_sec"]
 
 
 class WaveZombieSpawner(ZombieSpawner):
-    def __init__(self):
+    def __init__(self, enabled_rows=None):
         self._next_wave_frame = FIRST_WAVE_DELAY * config.FPS
         self.p = ZOMBIE_SPAWN["base_advanced_probability"]
         self.wave_index = 0
         self.completed_sublevels = 0
+        self.completed_flag_waves = 0
         self.last_wave_was_flag = False
+        self._pending_flag_wave_clear = False
+        self.enabled_rows = tuple(
+            range(config.N_LANES)
+            if enabled_rows is None
+            else enabled_rows
+        )
 
     def spawn(self, scene):
         current_frame = int(getattr(scene, "_chrono", 0))
+        if self._pending_flag_wave_clear and len(scene.zombies) == 0:
+            self.completed_flag_waves += 1
+            self.completed_sublevels = self.completed_flag_waves
+            self._pending_flag_wave_clear = False
+
         if self.wave_index > 0 and len(scene.zombies) == 0:
             self._next_wave_frame = min(
                 self._next_wave_frame,
@@ -38,9 +50,9 @@ class WaveZombieSpawner(ZombieSpawner):
             == ZOMBIE_SPAWN["flag_wave_remainder"]
         )
         if self.last_wave_was_flag:
-            scene.add_zombie(Zombie_flag(0))
-            self.completed_sublevels += 1
-        lane = random.choice(range(config.N_LANES))
+            scene.add_zombie(Zombie_flag(random.choice(self.enabled_rows)))
+            self._pending_flag_wave_clear = True
+        lane = random.choice(self.enabled_rows)
         s = random.random()
         if s < self.p:
             scene.add_zombie(Zombie_bucket(lane))
