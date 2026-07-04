@@ -51,7 +51,6 @@ class DDQNWorkerPool(AsyncWorkerPool):
         self.stats_queue = self.make_queue(maxsize=1024)
         self.weight_queues = self.make_per_worker_queues(maxsize=1)
         self.scenario_queues = self.make_per_worker_queues(maxsize=1)
-
     def start(self):
         self.start_workers(
             target=ddqn_worker_main,

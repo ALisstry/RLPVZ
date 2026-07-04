@@ -176,5 +176,15 @@ training:
     ddqn_hidden_sizes: [2048, 2048]
     use_dueling: false             # Dueling DQN 架构 (Wang et al., 2016)
 
+  # 定期评估：独立 PVZ 实例 + 模型快照，数据不入训练 buffer
+  eval:
+    enabled: true
+    freq_episodes: 1000
+    episodes: 50
+    deterministic: true
+    save_episode_details: true
+    real_num_envs: 1
+    real_base_port: 13000
+
   env:
     max_steps: 10000

@@ -44,10 +44,13 @@ class EpisodeStats:
 
 class DDQNTrainingStats:
     _MAX_LOSS_HISTORY = 20000
-    _MAX_EPISODE_HISTORY = 10000
+    _MAX_EPISODE_HISTORY_DEFAULT = 10000
 
-    def __init__(self, window: int = 100):
+    def __init__(self, window: int = 100, max_episodes: int = 0):
         self.window = window
+        self._max_episode_history = (
+            max_episodes if max_episodes > 0 else self._max_episode_history_DEFAULT
+        )
         self.episode_count = 0
         self.training_rewards = []
         self.training_iterations = []
@@ -59,13 +62,16 @@ class DDQNTrainingStats:
         self.training_entropy = []
         self.training_advantage = []
         self.training_grad_norm = []
+        self.eval_steps = []       # episode numbers where eval ran
+        self.eval_rewards = []     # mean reward per eval round
+        self.eval_win_rates = []   # win rate per eval round
         self.mean_training_rewards = []
         self.mean_training_iterations = []
         self.sync_eps = []
 
     @classmethod
-    def from_history(cls, window: int, snapshot=None, events=None):
-        stats = cls(window=window)
+    def from_history(cls, window: int, snapshot=None, events=None, max_episodes: int = 0):
+        stats = cls(window=window, max_episodes=max_episodes)
         events = events or []
 
         # Determine the trustworthy episode count from snapshot (saved atomically
@@ -79,6 +85,8 @@ class DDQNTrainingStats:
             stats.training_max_q = list(snapshot.max_q_values)
             stats.training_entropy = list(snapshot.entropy_values)
             stats.training_advantage = list(snapshot.advantage_values)
+            stats.eval_steps = list(snapshot.eval_steps)
+            stats.eval_rewards = list(snapshot.eval_rewards)
             stats.training_grad_norm = list(snapshot.grad_norm_values)
             stats.real_rewards = list(snapshot.eval_rewards)
             stats.eval_episodes = list(snapshot.eval_steps)
@@ -129,10 +137,10 @@ class DDQNTrainingStats:
         self.training_successes.append(1.0 if success else 0.0)
 
         # Cap per-episode lists
-        if len(self.training_rewards) > self._MAX_EPISODE_HISTORY:
-            self.training_rewards = self.training_rewards[-self._MAX_EPISODE_HISTORY:]
-            self.training_iterations = self.training_iterations[-self._MAX_EPISODE_HISTORY:]
-            self.training_successes = self.training_successes[-self._MAX_EPISODE_HISTORY:]
+        if len(self.training_rewards) > self._max_episode_history:
+            self.training_rewards = self.training_rewards[-self._max_episode_history:]
+            self.training_iterations = self.training_iterations[-self._max_episode_history:]
+            self.training_successes = self.training_successes[-self._max_episode_history:]
 
         recent_rewards = self.training_rewards[-self.window :]
         recent_iterations = self.training_iterations[-self.window :]
@@ -144,9 +152,9 @@ class DDQNTrainingStats:
         self.mean_training_iterations.append(mean_iterations)
 
         # Cap mean lists
-        if len(self.mean_training_rewards) > self._MAX_EPISODE_HISTORY:
-            self.mean_training_rewards = self.mean_training_rewards[-self._MAX_EPISODE_HISTORY:]
-            self.mean_training_iterations = self.mean_training_iterations[-self._MAX_EPISODE_HISTORY:]
+        if len(self.mean_training_rewards) > self._max_episode_history:
+            self.mean_training_rewards = self.mean_training_rewards[-self._max_episode_history:]
+            self.mean_training_iterations = self.mean_training_iterations[-self._max_episode_history:]
 
         return EpisodeStats(
             episode=self.episode_count,
@@ -184,6 +192,11 @@ class DDQNTrainingStats:
             if len(values) > self._MAX_LOSS_HISTORY:
                 setattr(self, attr, values[-self._MAX_LOSS_HISTORY:])
 
+    def record_eval_result(self, episode: int, mean_reward: float, win_rate: float):
+        self.eval_steps.append(episode)
+        self.eval_rewards.append(mean_reward)
+        self.eval_win_rates.append(win_rate)
+
     def record_sync(self):
         self.sync_eps.append(self.episode_count)
 
@@ -202,6 +215,8 @@ class DDQNTrainingStats:
             entropy_values=list(self.training_entropy),
             advantage_values=list(self.training_advantage),
             grad_norm_values=list(self.training_grad_norm),
+            eval_steps=list(self.eval_steps),
+            eval_rewards=list(self.eval_rewards),
             force=force,
         )
 
@@ -323,9 +338,9 @@ class DDQNMetricEmitter:
 
 
 class DDQNConsoleReporter:
-    def print_progress(self, episode_stats, worker_id=None):
+    def print_progress(self, episode_stats, worker_id=None, mode_tag=""):
         worker_text = f"Worker: {worker_id} " if worker_id is not None else ""
-        print(f"{worker_text}{episode_stats.progress_line}", flush=True)
+        print(f"{mode_tag}{worker_text}{episode_stats.progress_line}", flush=True)
 
     def print_checkpoint(self, episode_count):
         print(

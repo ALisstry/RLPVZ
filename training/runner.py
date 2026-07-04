@@ -8,7 +8,6 @@ from .game_instances import (
 )
 from .logging import setup_logging
 from .paths import build_run_paths
-from .game_instances import prepare_game_instances, terminate_pvz_processes
 from utils.train_utils import (
     load_training_config,
     print_metadata,
@@ -88,6 +87,10 @@ class TrainRunner:
                 context.artifacts.close()
                 terminate_pvz_processes(
                     context.game_instances,
+                    auto_start=getattr(self.args, "auto_start", True),
+                )
+                terminate_pvz_processes(
+                    context.eval_game_instances,
                     auto_start=getattr(self.args, "auto_start", True),
                 )
 

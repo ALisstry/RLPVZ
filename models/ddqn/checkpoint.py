@@ -174,9 +174,11 @@ def save_checkpoint(args, payload=None, run_paths=None, **_kwargs):
             print(f"  buffer     : {len(extra['buffer'])} entries")
         print(f"  episode    : {extra.get('episode_count', 0)}")
     else:
+        os.makedirs(os.path.dirname(paths.cached_path) or ".", exist_ok=True)
         torch.save(cpu_state_dict, paths.cached_path)
 
     if paths.tagged_path:
+        os.makedirs(os.path.dirname(paths.tagged_path) or ".", exist_ok=True)
         torch.save(cpu_state_dict, paths.tagged_path)
 
     if paths.explicit_path:

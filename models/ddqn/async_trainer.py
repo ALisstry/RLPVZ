@@ -4,12 +4,12 @@ import os
 import numpy as np
 import torch
 
-from training.evaluation import BestEvaluationCheckpoint, EvaluationScheduler
+from training.evaluation import EvaluationScheduler
 from training.metrics import load_metric_events, load_training_snapshot
 from utils.train_utils import get_current_stage_name, load_training_config
 
-from .evaluate import evaluate_ddqn_state_dict
 from .ddqn import PrioritizedReplayBuffer
+from .evaluate import evaluate_ddqn_state_dict
 from .learner import DDQNLearner
 from .monitoring import (
     DDQNConsoleReporter,
@@ -61,10 +61,12 @@ class AsyncDDQNTrainer:
         if context is not None and getattr(args, "auto_resume", True):
             snapshot = load_training_snapshot(context.run_paths.metrics_snapshot_path)
             metric_events = load_metric_events(context.run_paths.metrics_csv_path)
+        max_ep = max(1, int(getattr(args, "ddqn_episodes", 10000)))
         self.stats = DDQNTrainingStats.from_history(
             window=metric_window,
             snapshot=snapshot,
             events=metric_events,
+            max_episodes=max_ep,
         )
 
         self.transition_count = max(
@@ -307,6 +309,21 @@ class AsyncDDQNTrainer:
 
             self._emit_training_metrics()
 
+            # 每隔 1000 episode 自动保存指标快照副本
+            if (self.stats.episode_count > 0
+                    and self.stats.episode_count % 1000 == 0
+                    and self.context is not None):
+                try:
+                    import shutil
+                    self._emit_training_metrics(force=True)
+                    src = self.context.run_paths.metrics_snapshot_path
+                    dst = src.replace(
+                        ".json", f"_ep{self.stats.episode_count:06d}.json"
+                    )
+                    shutil.copy2(src, dst)
+                except Exception:
+                    pass
+
             progress_line = episode_stats.progress_line
             self.reporter.print_progress(episode_stats, message["worker_id"])
 
@@ -348,6 +365,32 @@ class AsyncDDQNTrainer:
         self._last_snapshot_ep = ep
         self.metric_emitter.emit_snapshot(self.stats.to_snapshot(force=force))
 
+    def _run_strict_eval(self):
+        """使用独立 PVZ 实例和模型快照进行评估，数据不入训练 buffer。"""
+        if self.context is None or not self.context.eval_game_instances:
+            return
+        stage_name = get_current_stage_name(self.context.curriculum)
+        try:
+            eval_result = evaluate_ddqn_state_dict(
+                args=self.args,
+                state_dict=self.learner.state_dict_cpu(),
+                instances=self.context.eval_game_instances,
+                env_spec=self.context.env_spec,
+                scenario_spec=self.context.scenario_spec,
+                episodes=self.context.eval_config.episodes,
+                episode=self.stats.episode_count,
+                step=self.transition_count,
+                stage_name=stage_name,
+            )
+            self.stats.record_eval_result(
+                episode=self.stats.episode_count,
+                mean_reward=eval_result.reward_mean,
+                win_rate=eval_result.win_rate,
+            )
+            self.reporter.print_strict_eval(eval_result, stage_name)
+        except Exception as exc:
+            print(f"\n[Eval] strict eval failed: {exc}", flush=True)
+
     def _update_curriculum(self, worker_pool, message, episode_stats):
         if self.context is None:
             return
@@ -364,37 +407,3 @@ class AsyncDDQNTrainer:
         else:
             worker_pool.acknowledge_episode(int(message["worker_id"]))
 
-    def _run_strict_eval(self):
-        if self.context is None or not self.context.eval_game_instances:
-            return
-        stage_name = get_current_stage_name(self.context.curriculum)
-        try:
-            eval_result = evaluate_ddqn_state_dict(
-                args=self.args,
-                state_dict=self.learner.state_dict_cpu(),
-                instances=self.context.eval_game_instances,
-                env_spec=self.context.env_spec,
-                scenario_spec=self.context.scenario_spec,
-                episodes=self.context.eval_config.episodes,
-                episode=self.stats.episode_count,
-                step=self.transition_count,
-                stage_name=stage_name,
-            )
-            self.context.evaluation_writer.write(eval_result)
-            if self.best_eval_checkpoint is None:
-                self.best_eval_checkpoint = BestEvaluationCheckpoint(
-                    self.context.evaluation_writer.output_dir,
-                    model_filename="best_model.pt",
-                )
-            saved_path = self.best_eval_checkpoint.maybe_save(
-                eval_result,
-                lambda path: torch.save(self.learner.state_dict_cpu(), path),
-            )
-            if saved_path is not None:
-                print(f"[Eval] New best model saved to {saved_path}", flush=True)
-            self.metric_emitter.emit_strict_eval(
-                eval_result, self.transition_count
-            )
-            self.reporter.print_strict_eval(eval_result, stage_name)
-        except Exception as exc:
-            print(f"\n[Eval] strict eval failed: {exc}", flush=True)

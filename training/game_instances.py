@@ -32,7 +32,7 @@ def prepare_game_instances(args):
     if getattr(args, "launch_toolkit", False):
         _launch_toolkit()
 
-    multi = len(instances) > 1
+    multi = len(instances) > 1 or getattr(args, "_force_new_instance", False)
     known_pids = set(list_pvz_processes())
     for i, instance in enumerate(instances):
         label = f"[{i + 1}/{len(instances)}]"
@@ -63,6 +63,7 @@ def prepare_eval_game_instances(args, eval_config):
     if not getattr(eval_config, "enabled", False):
         return []
     eval_args = copy(args)
+    eval_args._force_new_instance = True  # eval 必须启动独立进程
     eval_args.num_envs = max(1, int(getattr(eval_config, "real_num_envs", 1)))
     if getattr(eval_config, "real_base_port", None) is not None:
         eval_args.base_port = int(eval_config.real_base_port)
