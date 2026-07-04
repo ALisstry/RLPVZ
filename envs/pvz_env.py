@@ -1541,17 +1541,47 @@ class PVZEnv(gym.Env):
         r, _ = self._compute_reward_debug(game_state)
         return r
     
+    def _restart_game_process(self):
+        """终极兜底：杀旧进程 → 启新进程 → 注入 DLL → 重连。"""
+        self.pvz = None
+        self.hook_client = None
+        if self.target_pid:
+            try:
+                psutil.Process(self.target_pid).terminate()
+            except Exception:
+                pass
+            time.sleep(1.0)
+        subprocess.Popen(
+            [self.pvz_exe_path], cwd=os.path.dirname(self.pvz_exe_path))
+        time.sleep(5.0)
+        self.target_pid = find_pvz_process()
+        inject_dll(pid=self.target_pid, port=self.hook_port)
+        time.sleep(1.0)
+        self.hook_client = HookClient(port=self.hook_port)
+        self.hook_client.connect()
+        self.hook_client.set_game_speed(min(self.game_speed, 10.0))
+        self.pvz = PVZInterface(
+            mode=InterfaceMode.HOOK,
+            hook_port=self.hook_port,
+            target_pid=self.target_pid,
+            connect_hook_client=False,
+        )
+        self.pvz.attach()
+        time.sleep(10.0)  # 等游戏初始化
+
     def _dismiss_zombie_won(self):
-        """等待 ZOMBIES_WON 动画播完，点击 (400,400) 退出结算。"""
+        """等待 ZOMBIES_WON 动画播完 → 点击 (400,400) → back_to_main → 重启。"""
         time.sleep(5.0)
         for _ in range(10):
             self.hook_client.click_scaled(400, 400)
             time.sleep(0.5)
             if self.hook_client.get_ui() != 4:
-                time.sleep(5.0)        # 等退出动画播完
+                time.sleep(5.0)
                 return
         self.hook_client.back_to_main()
         time.sleep(5.0)
+        if self.hook_client.get_ui() == 4:
+            self._restart_game_process()
 
     def _handle_game_failure(self):
         """处理游戏失败，返回主菜单"""
