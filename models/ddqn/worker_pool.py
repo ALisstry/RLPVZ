@@ -1,4 +1,5 @@
 import queue
+import time
 
 import numpy as np
 
@@ -51,6 +52,9 @@ class DDQNWorkerPool(AsyncWorkerPool):
         self.stats_queue = self.make_queue(maxsize=1024)
         self.weight_queues = self.make_per_worker_queues(maxsize=1)
         self.scenario_queues = self.make_per_worker_queues(maxsize=1)
+        self.pause_event = self.ctx.Event()          # set → workers exit to main menu
+        self.paused_ack = self.ctx.Value('i', 0)     # atomic counter of paused workers
+
     def start(self):
         self.start_workers(
             target=ddqn_worker_main,
@@ -67,6 +71,8 @@ class DDQNWorkerPool(AsyncWorkerPool):
                 self.env_spec,
                 self.scenario_spec,
                 self.initial_global_episode,
+                self.pause_event,
+                self.paused_ack,
             ),
             label="DDQN",
         )
@@ -172,8 +178,11 @@ def ddqn_worker_main(
     env_spec,
     scenario_spec,
     initial_global_episode: int = 0,
+    pause_event=None,
+    paused_ack=None,
 ):
     env = None
+    _paused = False  # track whether this worker has already acked
     try:
         setup_worker_logging(args)
         env = _build_worker_env(args, instance, worker_id, env_spec, scenario_spec)
@@ -221,12 +230,33 @@ def ddqn_worker_main(
             end_epsilon=0.05,
         )
 
-        state = _reset_env_with_retry(env, worker_id, instance, stats_queue, stop_event)
+        def _check_pause():
+            """如果主线程要求暂停，退出到主菜单并阻塞等待。返回 True 表示已暂停。"""
+            nonlocal _paused
+            if pause_event is not None and pause_event.is_set():
+                if not _paused:
+                    try:
+                        env.env.hook_client.back_to_main()
+                    except Exception:
+                        pass
+                    with paused_ack.get_lock():
+                        paused_ack.value += 1
+                    _paused = True
+                time.sleep(0.1)
+                return True
+            _paused = False
+            return False
+
+        state = _reset_env_with_retry(env, worker_id, instance, stats_queue, stop_event, pause_event)
+        _check_pause()
         episode_reward = 0.0
         local_episode = 0
 
         global_episode = initial_global_episode
         while not stop_event.is_set():
+            if _check_pause():
+                continue
+
             _consume_scenario_queue(env, scenario_queue)
             latest_weights = _drain_latest_weights(weights_queue)
             if latest_weights is not None:
@@ -251,9 +281,11 @@ def ddqn_worker_main(
                     }
                 )
                 state = _reset_env_with_retry(
-                    env, worker_id, instance, stats_queue, stop_event
+                    env, worker_id, instance, stats_queue, stop_event, pause_event
                 )
                 episode_reward = 0.0
+                if _check_pause():
+                    continue
                 continue
             next_mask = np.array(env.mask_available_actions(), dtype=bool)
 
@@ -305,7 +337,8 @@ def ddqn_worker_main(
                 _consume_scenario_queue(env, scenario_queue, wait=True)
             else:
                 _consume_scenario_queue(env, scenario_queue)
-            state = _reset_env_with_retry(env, worker_id, instance, stats_queue, stop_event)
+            state = _reset_env_with_retry(env, worker_id, instance, stats_queue, stop_event, pause_event)
+            _check_pause()
 
     except KeyboardInterrupt:
         stop_event.set()
@@ -330,9 +363,12 @@ def ddqn_worker_main(
                 pass
 
 
-def _reset_env_with_retry(env, worker_id, instance, stats_queue, stop_event):
+def _reset_env_with_retry(env, worker_id, instance, stats_queue, stop_event,
+                          pause_event=None):
     consecutive_failures = 0
     while not stop_event.is_set():
+        if pause_event is not None and pause_event.is_set():
+            return None  # 暂停中，不重试，交给外层 _check_pause 处理
         try:
             return env.reset()
         except Exception as exc:

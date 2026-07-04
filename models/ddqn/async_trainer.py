@@ -1,5 +1,6 @@
 import queue
 import os
+import time
 
 import numpy as np
 import torch
@@ -356,7 +357,18 @@ class AsyncDDQNTrainer:
                 self.eval_scheduler is not None
                 and self.eval_scheduler.should_run(self.stats.episode_count)
             ):
+                # 通知所有 Worker 退出到主菜单并挂起
+                num_workers = len(worker_pool.instances)
+                worker_pool.paused_ack.value = 0
+                worker_pool.pause_event.set()
+                for _ in range(600):  # 最多等 60 秒
+                    if worker_pool.paused_ack.value >= num_workers:
+                        break
+                    time.sleep(0.1)
                 self._run_strict_eval()
+                # 恢复训练
+                worker_pool.pause_event.clear()
+                worker_pool.paused_ack.value = 0
 
     def _emit_training_metrics(self, force=False):
         ep = self.stats.episode_count

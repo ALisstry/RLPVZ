@@ -608,16 +608,13 @@ class PVZEnv(gym.Env):
 
         # 从失败/奖励/游戏中退回主菜单
         if ui in (3, 4, 5):
-            if ui == 4:  # ZOMBIES_WON
-                for _ in range(10):
-                    self.hook_client.click_scaled(280, 370)
-                    time.sleep(0.3)
-                    if self.hook_client.get_ui() != 4:
-                        break
-            self.hook_client.back_to_main()
-            time.sleep(1.0)
-
-        ui = self.hook_client.get_ui()
+            if ui == 4:
+                self._dismiss_zombie_won()
+                ui = self.hook_client.get_ui()
+            if ui != 2:  # 已经是选卡界面则跳过主菜单往返
+                self.hook_client.back_to_main()
+                time.sleep(1.0)
+                ui = self.hook_client.get_ui()
 
         # 处理边缘状态
         if ui == 0:  # 加载中
@@ -754,32 +751,21 @@ class PVZEnv(gym.Env):
         # 显式处理结算画面：无论胜负，都先退回主菜单
         # step() 中的 _handle_game_failure 可能未运行或未覆盖所有情况
         if ui in (4, 5):  # ZOMBIES_WON / AWARD
-            screen = "失败" if ui == 4 else "奖励"
-            self._emit(
-                f"[PVZEnv] reset 检测到结算画面 (UI={ui}={screen})，退回主菜单...",
-                console_level=1, log_level=1,
-            )
-            # 点击画面通过结算
-            for attempt in range(10):
-                self.hook_client.click_scaled(280, 370)
-                time.sleep(0.3)
-                new_ui = self.hook_client.get_ui()
-                if new_ui not in (4, 5):
-                    ui = new_ui
-                    break
-            # 如果还在结算画面，强制返回主菜单
-            if ui in (4, 5):
-                self.hook_client.back_to_main()
-                time.sleep(1.5)
+            if ui == 4:
+                self._dismiss_zombie_won()
                 ui = self.hook_client.get_ui()
-            # 确保到达主菜单
-            if ui != 1:
+            if ui == 2:     # 已在选卡界面，跳过主菜单往返
+                pass
+            else:
                 self.hook_client.back_to_main()
                 time.sleep(1.0)
                 ui = self.hook_client.get_ui()
-            if ui != 1:
-                self._require_ui(1, timeout=5.0, error_message="从结算画面返回主菜单超时")
-                ui = 1
+                if ui != 1:
+                    self.hook_client.back_to_main()
+                    time.sleep(1.0)
+                    ui = self.hook_client.get_ui()
+                    if ui != 1:
+                        ui = 1
 
         if ui == -1:
             # 尝试直接用内存读取判断是否在游戏中
@@ -809,14 +795,9 @@ class PVZEnv(gym.Env):
             if ui == 7:
                 raise RuntimeError("关闭选项界面失败")
         
-        if ui == 4:  # ZOMBIES_WON
-            for attempt in range(10):
-                self.hook_client.click_scaled(280, 370)
-                time.sleep(0.3)
-                new_ui = self.hook_client.get_ui()
-                if new_ui != 4:
-                    ui = new_ui
-                    break
+        if ui == 4:
+            self._dismiss_zombie_won()
+            ui = self.hook_client.get_ui()
             if ui == 4:
                 ui = self._back_to_main_or_raise(timeout=2.0)
         
@@ -1560,22 +1541,28 @@ class PVZEnv(gym.Env):
         r, _ = self._compute_reward_debug(game_state)
         return r
     
+    def _dismiss_zombie_won(self):
+        """等待 ZOMBIES_WON 动画播完，点击 (400,400) 退出结算。"""
+        time.sleep(5.0)
+        for _ in range(10):
+            self.hook_client.click_scaled(400, 400)
+            time.sleep(0.5)
+            if self.hook_client.get_ui() != 4:
+                time.sleep(5.0)        # 等退出动画播完
+                return
+        self.hook_client.back_to_main()
+        time.sleep(5.0)
+
     def _handle_game_failure(self):
         """处理游戏失败，返回主菜单"""
         if not self.hook_client:
             return
-        
-        time.sleep(0.5)
+
         ui = self.hook_client.get_ui()
-        
-        if ui == 4:  # ZOMBIES_WON
-            for attempt in range(10):
-                self.hook_client.click_scaled(280, 370)
-                time.sleep(0.3)
-                ui = self.hook_client.get_ui()
-                if ui != 4:
-                    break
-        
+        if ui == 4:
+            self._dismiss_zombie_won()
+            ui = self.hook_client.get_ui()
+
         if ui == 3 or ui == 4:
             self.hook_client.back_to_main()
             time.sleep(1.0)
