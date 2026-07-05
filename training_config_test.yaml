@@ -179,8 +179,8 @@ training:
   # 定期评估：Worker 复用训练进程，数据不入训练 buffer
   eval:
     enabled: true
-    freq_episodes: 1000
-    episodes: 50
+    freq_episodes: 25
+    episodes: 5
     deterministic: true
     save_episode_details: true
 

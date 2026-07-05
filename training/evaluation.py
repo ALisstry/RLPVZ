@@ -17,8 +17,6 @@ class EvaluationConfig:
     episodes: int = 20
     deterministic: bool = True
     save_episode_details: bool = True
-    real_num_envs: int = 1
-    real_base_port: int | None = None
 
 
 @dataclass(frozen=True)
@@ -205,12 +203,6 @@ def load_evaluation_config(raw: dict[str, Any] | None) -> EvaluationConfig:
         episodes=int(raw.get("episodes", 20)),
         deterministic=bool(raw.get("deterministic", True)),
         save_episode_details=bool(raw.get("save_episode_details", True)),
-        real_num_envs=max(1, int(raw.get("real_num_envs", 1))),
-        real_base_port=(
-            None
-            if raw.get("real_base_port") in (None, "")
-            else int(raw.get("real_base_port"))
-        ),
     )
 
 

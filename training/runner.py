@@ -2,7 +2,6 @@ from .checkpoint import CheckpointManager
 from .context import build_train_context
 from .evaluation import load_evaluation_config
 from .game_instances import (
-    prepare_eval_game_instances,
     prepare_game_instances,
     terminate_pvz_processes,
 )
@@ -39,7 +38,7 @@ class TrainRunner:
             .get("training", {})
             .get("eval", {})
         )
-        eval_game_instances = prepare_eval_game_instances(self.args, eval_config)
+        eval_game_instances = []  # eval 复用训练 Worker，无需独立实例
 
         context = build_train_context(
             args=self.args,
@@ -87,10 +86,6 @@ class TrainRunner:
                 context.artifacts.close()
                 terminate_pvz_processes(
                     context.game_instances,
-                    auto_start=getattr(self.args, "auto_start", True),
-                )
-                terminate_pvz_processes(
-                    context.eval_game_instances,
                     auto_start=getattr(self.args, "auto_start", True),
                 )
 

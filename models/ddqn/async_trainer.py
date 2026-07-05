@@ -10,7 +10,6 @@ from training.metrics import load_metric_events, load_training_snapshot
 from utils.train_utils import get_current_stage_name, load_training_config
 
 from .ddqn import PrioritizedReplayBuffer
-from .evaluate import evaluate_ddqn_state_dict
 from .learner import DDQNLearner
 from .monitoring import (
     DDQNConsoleReporter,
@@ -357,18 +356,8 @@ class AsyncDDQNTrainer:
                 self.eval_scheduler is not None
                 and self.eval_scheduler.should_run(self.stats.episode_count)
             ):
-                # 通知所有 Worker 退出到主菜单并挂起
-                num_workers = len(worker_pool.instances)
-                worker_pool.paused_ack.value = 0
-                worker_pool.pause_event.set()
-                for _ in range(600):  # 最多等 60 秒
-                    if worker_pool.paused_ack.value >= num_workers:
-                        break
-                    time.sleep(0.1)
-                self._run_strict_eval()
-                # 恢复训练
-                worker_pool.pause_event.clear()
-                worker_pool.paused_ack.value = 0
+                self._run_worker_eval(worker_pool)
+                return  # 重新进入主循环，清空队列后恢复训练
 
     def _emit_training_metrics(self, force=False):
         ep = self.stats.episode_count
@@ -377,31 +366,84 @@ class AsyncDDQNTrainer:
         self._last_snapshot_ep = ep
         self.metric_emitter.emit_snapshot(self.stats.to_snapshot(force=force))
 
-    def _run_strict_eval(self):
-        """使用独立 PVZ 实例和模型快照进行评估，数据不入训练 buffer。"""
-        if self.context is None or not self.context.eval_game_instances:
-            return
-        stage_name = get_current_stage_name(self.context.curriculum)
-        try:
-            eval_result = evaluate_ddqn_state_dict(
-                args=self.args,
-                state_dict=self.learner.state_dict_cpu(),
-                instances=self.context.eval_game_instances,
-                env_spec=self.context.env_spec,
-                scenario_spec=self.context.scenario_spec,
-                episodes=self.context.eval_config.episodes,
-                episode=self.stats.episode_count,
-                step=self.transition_count,
-                stage_name=stage_name,
-            )
+    def _run_worker_eval(self, worker_pool):
+        """使用训练 Worker 进程运行评估回合（eps=0），数据不入训练 buffer。"""
+        eval_episodes = self.eval_scheduler.config.episodes
+
+        # 设置 eval_mode + 计数器，Worker 在下次循环迭代时自动进入评估模式
+        worker_pool.eval_slots.value = eval_episodes
+        worker_pool.eval_done.value = eval_episodes
+        worker_pool.eval_mode.set()
+        print("[Eval] 开始评估，等待 Worker 收集结果...", flush=True)
+
+        # 收集 eval 结果
+        eval_rewards = []
+        eval_wins = []
+        eval_iterations = []
+        start_time = time.perf_counter()
+        while worker_pool.eval_done.value > 0:
+            try:
+                message = worker_pool.stats_queue.get(timeout=120.0)
+            except queue.Empty:
+                print("[Eval] 等待 eval episode 超时", flush=True)
+                break
+
+            if message["type"] == "eval_episode":
+                eval_rewards.append(message["reward"])
+                eval_wins.append(message.get("win", False))
+                eval_iterations.append(message.get("iterations", 0))
+                collected = len(eval_rewards)
+                win_mark = "✓" if message.get("win") else " "
+                print(
+                    f"[Eval {collected}/{eval_episodes}]  "
+                    f"reward={message['reward']:.0f}  "
+                    f"iter={message.get('iterations', 0)}  "
+                    f"win={win_mark}  "
+                    f"worker={message.get('worker_id', '?')}",
+                    flush=True,
+                )
+            elif message["type"] == "error":
+                self.worker_status.handle_error(message)
+            elif message["type"] == "warning":
+                self.worker_status.handle_warning(message)
+            # 忽略其他类型消息（训练 episode 等）
+
+        # 关闭 eval_mode，Worker 自动切回训练
+        worker_pool.eval_mode.clear()
+        duration = time.perf_counter() - start_time
+
+        # 记录评估结果
+        if eval_rewards:
+            mean_reward = sum(eval_rewards) / len(eval_rewards)
+            win_rate = sum(1 for w in eval_wins if w) / len(eval_wins)
+            mean_iterations = sum(eval_iterations) / len(eval_iterations)
             self.stats.record_eval_result(
                 episode=self.stats.episode_count,
-                mean_reward=eval_result.reward_mean,
-                win_rate=eval_result.win_rate,
+                mean_reward=mean_reward,
+                win_rate=win_rate,
             )
-            self.reporter.print_strict_eval(eval_result, stage_name)
-        except Exception as exc:
-            print(f"\n[Eval] strict eval failed: {exc}", flush=True)
+            stage_name = (
+                get_current_stage_name(self.context.curriculum)
+                if self.context else ""
+            )
+            stage_text = f" | stage={stage_name}" if stage_name else ""
+            print(
+                f"[Eval] Episode {self.stats.episode_count}{stage_text} | "
+                f"episodes={len(eval_rewards)} | "
+                f"reward={mean_reward:.2f} | "
+                f"survival={mean_iterations:.1f} | "
+                f"win_rate={win_rate:.2%} | "
+                f"duration={duration:.1f}s",
+                flush=True,
+            )
+        else:
+            print(
+                f"[Eval] Episode {self.stats.episode_count} | "
+                "未收集到任何 eval 结果",
+                flush=True,
+            )
+
+        print("[Eval] 评估结束，恢复训练", flush=True)
 
     def _update_curriculum(self, worker_pool, message, episode_stats):
         if self.context is None:
