@@ -60,6 +60,7 @@ class TrainingCurvePlotter:
         plots = [
             ("rewards",       lambda: self._plot_reward_trend(mean_rewards, eval_steps, eval_rewards)),
             ("episode_rewards", lambda: self._plot_episode_rewards(episode_rewards, mean_rewards)),
+            ("reward_ma500",  lambda: self._plot_reward_ma500(episode_rewards, mean_rewards, eval_steps, eval_rewards)),
             ("iterations",    lambda: self._plot_iterations(mean_iterations)),
             ("loss",          lambda: self._plot_loss(losses)),
             ("td_error",      lambda: self._plot_td_error(td_error_means)),
@@ -149,6 +150,81 @@ class TrainingCurvePlotter:
         self._legend_if_available(ax)
         fig.tight_layout()
         fig.savefig(self._derived_path("episode_rewards"))
+        plt.close(fig)
+
+    def _plot_reward_ma500(self, episode_rewards, mean_rewards,
+                           eval_steps, eval_rewards):
+        """500-episode moving average reward — 平滑长期趋势，消除短期噪声。"""
+        plt = self._plt
+        fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
+        ax.set_title("Reward Trend  (500-episode moving average)")
+
+        window = 500
+        has_500 = False
+
+        # 500-episode rolling mean
+        if episode_rewards and len(episode_rewards) >= window:
+            arr = np.asarray(episode_rewards, dtype=np.float64)
+            kernel = np.ones(window, dtype=np.float64) / window
+            ma500 = np.convolve(arr, kernel, mode="valid")
+            ma500_x = np.arange(window, len(arr) + 1)
+            ax.plot(
+                ma500_x, ma500,
+                color="#1f77b4",
+                linewidth=2.5,
+                label=f"mean reward (MA-500)",
+            )
+            has_500 = True
+        elif episode_rewards is not None:
+            # 不足 500 episode 时给出提示
+            ax.text(
+                0.5, 0.5,
+                f"MA-500 需要至少 {window} episodes（当前 {len(episode_rewards)}）",
+                transform=ax.transAxes,
+                ha="center", va="center",
+                fontsize=11, color="#9aa0a6",
+            )
+
+        # 当前窗口均值 (MA-100) 作为对比参考线
+        if mean_rewards:
+            ax.plot(
+                np.arange(1, len(mean_rewards) + 1),
+                mean_rewards,
+                color="#ff7f0e",
+                linewidth=1.2,
+                alpha=0.7,
+                label="mean reward (MA-100)",
+            )
+
+        # 评估奖励散点
+        if eval_rewards and eval_steps:
+            ax.plot(
+                eval_steps,
+                eval_rewards,
+                color="#d62728",
+                linewidth=1.6,
+                marker="o",
+                markersize=4,
+                label="eval reward",
+            )
+
+        # 原始 episode reward 半透明背景
+        if episode_rewards:
+            ax.plot(
+                np.arange(1, len(episode_rewards) + 1),
+                episode_rewards,
+                color="#9aa0a6",
+                alpha=0.18,
+                linewidth=0.7,
+                label="episode reward",
+            )
+
+        ax.set_xlabel("Episode")
+        ax.set_ylabel("Reward")
+        ax.grid(True, alpha=0.3)
+        self._legend_if_available(ax)
+        fig.tight_layout()
+        fig.savefig(self._derived_path("reward_ma500"))
         plt.close(fig)
 
     def _plot_iterations(self, mean_iterations):
