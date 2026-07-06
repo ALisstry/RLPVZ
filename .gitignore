@@ -37,3 +37,6 @@ build/
 ref/
 
 paper/
+
+# Benchmark
+benchmark_output/

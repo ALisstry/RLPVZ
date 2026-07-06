@@ -859,6 +859,7 @@ class PVZEnv(gym.Env):
         self._plant_appearances = {}
         self._plant_lifetime_steps = {}
         self._active_plant_starts = {}
+        self._plant_placements: list[tuple[int, int, int]] = []  # (plant_type, row, col)
         self._episode_win = None  # 重置胜负状态
         self._victory_printed = False  # 重置胜利打印标记
         self._no_zombie_steps = 0  # 重置无僵尸计数
@@ -2573,6 +2574,7 @@ class PVZEnv(gym.Env):
                 self._plant_appearances[plant_type] = (
                     self._plant_appearances.get(plant_type, 0) + 1
                 )
+                self._plant_placements.append(key)  # (plant_type, row, col)
 
         for key, start_step in list(self._active_plant_starts.items()):
             if key in current_keys:
@@ -2607,7 +2609,12 @@ class PVZEnv(gym.Env):
                 ),
                 "survival_unit": "env_step",
             }
-        return stats
+        # Include cell-level placement data for benchmark analysis
+        placements = [
+            {"plant_type": p[0], "row": p[1], "col": p[2]}
+            for p in self._plant_placements
+        ]
+        return {"plants": stats, "placements": placements}
 
     def _plant_name(self, plant_type: int) -> str:
         try:
