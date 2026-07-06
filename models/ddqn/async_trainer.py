@@ -11,6 +11,7 @@ from utils.train_utils import get_current_stage_name, load_training_config
 
 from .ddqn import PrioritizedReplayBuffer
 from .learner import DDQNLearner
+from .live_plotter import LivePlotter
 from .monitoring import (
     DDQNConsoleReporter,
     DDQNMetricEmitter,
@@ -138,7 +139,24 @@ class AsyncDDQNTrainer:
             1, int(getattr(args, "ddqn_plot_freq", 20))
         )  # rate-limit snapshot emission
         self._last_snapshot_ep = 0
+        self._dashboard_freq = max(
+            1, int(getattr(args, "ddqn_plot_freq", 20))
+        )
         self.best_eval_checkpoint = None
+
+        # ── Live training dashboard ──
+        dashboard_path = (
+            context.run_paths.dashboard_path
+            if context is not None
+            else os.path.join("models_output", "training_dashboard.png")
+        )
+        max_ep = max(1, int(getattr(args, "ddqn_episodes", 10000)))
+        self._live_plotter = LivePlotter(
+            save_path=dashboard_path,
+            window=100,
+            update_freq=self._dashboard_freq,
+            max_episodes=max_ep,
+        )
 
     def train(
         self,
@@ -257,6 +275,7 @@ class AsyncDDQNTrainer:
             self._drain_stats_queue(worker_pool)
             # Always save the final plot, even if training was interrupted.
             self._emit_training_metrics(force=True)
+            self._live_plotter.keep_open()
             self.reporter.print_finished(self.solved, self.stats.episode_count)
 
     def _drain_stats_queue(self, worker_pool):
@@ -283,6 +302,11 @@ class AsyncDDQNTrainer:
                 bool(message.get("win") is True),
                 message.get("epsilon", 1.0),
             )
+
+            # Keep live dashboard in sync with latest epsilon
+            self._live_plotter.set_epsilon(message.get("epsilon", 1.0))
+            self._live_plotter.update(self.stats, self.stats.episode_count)
+
             self.metric_emitter.emit_episode(
                 message, episode_stats, self.transition_count
             )

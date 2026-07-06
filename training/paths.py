@@ -16,6 +16,7 @@ class RunPaths:
     metrics_csv_path: str
     metrics_snapshot_path: str
     training_curve_path: str
+    dashboard_path: str
     heatmap_path: str
     log_dir: str
     log_file_path: str
@@ -69,6 +70,7 @@ def build_run_paths(args) -> RunPaths:
         metrics_csv_path=os.path.join(metrics_dir, "metrics.csv"),
         metrics_snapshot_path=os.path.join(metrics_dir, "metrics_snapshot.json"),
         training_curve_path=os.path.join(metrics_dir, "training_curve.png"),
+        dashboard_path=os.path.join(metrics_dir, "training_dashboard.png"),
         heatmap_path=os.path.join(metrics_dir, "heatmap.html"),
         log_dir=logs_dir,
         log_file_path=os.path.join(logs_dir, f"training_{run_id}.log"),

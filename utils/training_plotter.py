@@ -176,10 +176,10 @@ class TrainingCurvePlotter:
             )
             has_500 = True
         elif episode_rewards is not None:
-            # 不足 500 episode 时给出提示
+            # Not enough episodes for MA-500 window
             ax.text(
                 0.5, 0.5,
-                f"MA-500 需要至少 {window} episodes（当前 {len(episode_rewards)}）",
+                f"MA-500 requires at least {window} episodes (current: {len(episode_rewards)})",
                 transform=ax.transAxes,
                 ha="center", va="center",
                 fontsize=11, color="#9aa0a6",

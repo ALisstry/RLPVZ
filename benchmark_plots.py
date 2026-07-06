@@ -5,7 +5,7 @@ Generates analysis plots from benchmark episode data:
   - Plant-cell heatmap: distribution of each plant type across the grid
   - Cell statistics: most-planted type per cell, total plant count per cell
 
-All plots use a dark-background theme consistent with training curve plots.
+All plots use the default matplotlib white-background style.
 """
 
 from __future__ import annotations
@@ -21,11 +21,6 @@ import matplotlib.ticker as ticker
 import numpy as np
 
 
-# ── colour palette (dark theme) ──────────────────────────────────────────
-BG_COLOUR = "#1a1a2e"
-GRID_COLOUR = "#2d2d44"
-TEXT_COLOUR = "#e0e0e0"
-ACCENT_COLOUR = "#4ecdc4"
 PALETTE = [
     "#4ecdc4", "#ff6b6b", "#ffe66d", "#a8e6cf", "#ff8b94",
     "#b8a9c9", "#f0b27a", "#85c1e9", "#82e0aa", "#f1948a",
@@ -54,18 +49,6 @@ def generate_benchmark_plots(
         List of saved file paths.
     """
     os.makedirs(output_dir, exist_ok=True)
-    plt.rcParams.update({
-        "figure.facecolor": BG_COLOUR,
-        "axes.facecolor": BG_COLOUR,
-        "axes.edgecolor": GRID_COLOUR,
-        "axes.labelcolor": TEXT_COLOUR,
-        "text.color": TEXT_COLOUR,
-        "xtick.color": TEXT_COLOUR,
-        "ytick.color": TEXT_COLOUR,
-        "grid.color": GRID_COLOUR,
-        "legend.facecolor": BG_COLOUR,
-        "legend.edgecolor": GRID_COLOUR,
-    })
 
     plant_stats = (result.extra or {}).get("plant_stats") or {}
     placements = plant_stats.pop("_placements", []) if isinstance(plant_stats, dict) else []
@@ -121,39 +104,39 @@ def _plant_comparison(
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, max(5, len(names) * 0.5)))
     fig.suptitle("Plant Comparison — Survival Time & Placement Count",
-                 color=TEXT_COLOUR, fontsize=14, fontweight="bold", y=0.98)
+                 fontsize=14, fontweight="bold", y=0.98)
 
     x = range(len(names))
     colours_s = [PALETTE[i % len(PALETTE)] for i in range(len(names))]
     colours_c = [PALETTE[i % len(PALETTE)] for i in range(len(names))]
 
     # Left: mean survival steps
-    bars1 = ax1.barh(list(x), survival_vals, color=colours_s, edgecolor=GRID_COLOUR, height=0.6)
+    bars1 = ax1.barh(list(x), survival_vals, color=colours_s, height=0.6)
     ax1.set_yticks(list(x))
     ax1.set_yticklabels(names, fontsize=9)
     ax1.set_xlabel("Mean Survival Steps", fontsize=10)
-    ax1.set_title("Survival Time by Plant Type", fontsize=11, color=ACCENT_COLOUR)
+    ax1.set_title("Survival Time by Plant Type", fontsize=11)
     ax1.invert_yaxis()
     for bar, val in zip(bars1, survival_vals):
         ax1.text(bar.get_width() + ax1.get_xlim()[1] * 0.01, bar.get_y() + bar.get_height() / 2,
-                 f"{val:.0f}", va="center", fontsize=8, color=TEXT_COLOUR)
+                 f"{val:.0f}", va="center", fontsize=8)
     ax1.grid(axis="x", alpha=0.3)
 
     # Right: count
-    bars2 = ax2.barh(list(x), count_vals, color=colours_c, edgecolor=GRID_COLOUR, height=0.6)
+    bars2 = ax2.barh(list(x), count_vals, color=colours_c, height=0.6)
     ax2.set_yticks(list(x))
     ax2.set_yticklabels(names, fontsize=9)
     ax2.set_xlabel("Total Planted Count", fontsize=10)
-    ax2.set_title("Placement Count by Plant Type", fontsize=11, color=ACCENT_COLOUR)
+    ax2.set_title("Placement Count by Plant Type", fontsize=11)
     ax2.invert_yaxis()
     for bar, val in zip(bars2, count_vals):
         ax2.text(bar.get_width() + ax2.get_xlim()[1] * 0.01, bar.get_y() + bar.get_height() / 2,
-                 str(val), va="center", fontsize=8, color=TEXT_COLOUR)
+                 str(val), va="center", fontsize=8)
     ax2.grid(axis="x", alpha=0.3)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     path = os.path.join(output_dir, "plant_comparison.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor=BG_COLOUR)
+    fig.savefig(path, dpi=150, bbox_inches="tight", )
     return path
 
 
@@ -195,7 +178,7 @@ def _plant_cell_heatmaps(
         squeeze=False,
     )
     fig.suptitle("Plant Placement Distribution Heatmaps",
-                 color=TEXT_COLOUR, fontsize=14, fontweight="bold", y=0.99)
+                 fontsize=14, fontweight="bold", y=0.99)
 
     # Global colour scale
     all_counts = [v for pc in plant_cells.values() for v in pc.values()]
@@ -214,7 +197,7 @@ def _plant_cell_heatmaps(
         im = ax.imshow(grid, cmap="YlOrRd", origin="upper", aspect="equal",
                        vmin=0, vmax=vmax)
         name = plant_names.get(plant_type, f"ID {plant_type}")
-        ax.set_title(f"{name} (total={int(grid.sum())})", color=ACCENT_COLOUR, fontsize=10)
+        ax.set_title(f"{name} (total={int(grid.sum())})", fontsize=10)
         ax.set_xlabel("Column", fontsize=8)
         ax.set_ylabel("Row", fontsize=8)
         ax.set_xticks(range(cols))
@@ -236,11 +219,11 @@ def _plant_cell_heatmaps(
     # Shared colour bar
     cbar_ax = fig.add_axes([0.92, 0.08, 0.015, 0.84])
     cbar = fig.colorbar(im, cax=cbar_ax)
-    cbar.set_label("Plant Count", color=TEXT_COLOUR, fontsize=9)
-    cbar.ax.tick_params(colors=TEXT_COLOUR, labelsize=8)
+    cbar.set_label("Plant Count", fontsize=9)
+    cbar.ax.tick_params(labelsize=8)
 
     path = os.path.join(output_dir, "plant_cell_heatmaps.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor=BG_COLOUR)
+    fig.savefig(path, dpi=150, bbox_inches="tight", )
     return path
 
 
@@ -290,18 +273,18 @@ def _cell_statistics(
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
     fig.suptitle("Cell-Level Planting Statistics",
-                 color=TEXT_COLOUR, fontsize=14, fontweight="bold", y=0.98)
+                 fontsize=14, fontweight="bold", y=0.98)
 
     # ── Left: dominant plant per cell ──
     cmap_dominant = matplotlib.colors.ListedColormap(
-        [BG_COLOUR] + [type_colours.get(t, "#999999") for t in all_types]
+        ["#ffffff"] + [type_colours.get(t, "#999999") for t in all_types]
     )
     bounds = [-1.5] + [t - 0.5 for t in all_types] + [all_types[-1] + 0.5]
     norm = matplotlib.colors.BoundaryNorm(bounds, cmap_dominant.N)
 
     masked = np.ma.masked_where(dominant_grid < 0, dominant_grid)
     im1 = ax1.imshow(masked, cmap=cmap_dominant, norm=norm, origin="upper", aspect="equal")
-    ax1.set_title("Most-Planted Type per Cell", color=ACCENT_COLOUR, fontsize=11)
+    ax1.set_title("Most-Planted Type per Cell", fontsize=11)
     ax1.set_xlabel("Column", fontsize=9)
     ax1.set_ylabel("Row", fontsize=9)
     ax1.set_xticks(range(cols))
@@ -321,7 +304,7 @@ def _cell_statistics(
     vmax2 = max(int(total_grid.max()), 1)
     im2 = ax2.imshow(total_grid, cmap="YlOrRd", origin="upper", aspect="equal",
                      vmin=0, vmax=vmax2)
-    ax2.set_title("Total Plants Placed per Cell", color=ACCENT_COLOUR, fontsize=11)
+    ax2.set_title("Total Plants Placed per Cell", fontsize=11)
     ax2.set_xlabel("Column", fontsize=9)
     ax2.set_ylabel("Row", fontsize=9)
     ax2.set_xticks(range(cols))
@@ -336,8 +319,8 @@ def _cell_statistics(
                          fontsize=8, color="white" if val > vmax2 / 2 else "black")
 
     cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-    cbar2.set_label("Plant Count", color=TEXT_COLOUR, fontsize=9)
-    cbar2.ax.tick_params(colors=TEXT_COLOUR, labelsize=8)
+    cbar2.set_label("Plant Count", fontsize=9)
+    cbar2.ax.tick_params(labelsize=8)
 
     # Legend for dominant type
     if legend_handles:
@@ -349,14 +332,11 @@ def _cell_statistics(
             fontsize=7,
             title_fontsize=8,
             framealpha=0.8,
-            facecolor=BG_COLOUR,
-            edgecolor=GRID_COLOUR,
-            labelcolor=TEXT_COLOUR,
         )
 
     plt.tight_layout(rect=[0, 0, 1, 0.93])
     path = os.path.join(output_dir, "cell_statistics.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor=BG_COLOUR)
+    fig.savefig(path, dpi=150, bbox_inches="tight", )
     return path
 
 
