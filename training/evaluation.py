@@ -6,7 +6,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from statistics import mean, pstdev
+from statistics import mean, median, pstdev
 from typing import Any, Iterable
 
 
@@ -17,8 +17,6 @@ class EvaluationConfig:
     episodes: int = 20
     deterministic: bool = True
     save_episode_details: bool = True
-    real_num_envs: int = 1
-    real_base_port: int | None = None
 
 
 @dataclass(frozen=True)
@@ -52,10 +50,12 @@ class EvaluationResult:
     reward_std: float
     reward_min: float
     reward_max: float
+    reward_median: float
     survival_mean: float
     survival_std: float
     survival_min: float
     survival_max: float
+    survival_median: float
     win_rate: float
     win_count: int
     completed_sublevels_mean: float | None = None
@@ -96,10 +96,12 @@ class EvaluationWriter:
         "reward_std",
         "reward_min",
         "reward_max",
+        "reward_median",
         "survival_mean",
         "survival_std",
         "survival_min",
         "survival_max",
+        "survival_median",
         "win_rate",
         "win_count",
         "completed_sublevels_mean",
@@ -205,12 +207,6 @@ def load_evaluation_config(raw: dict[str, Any] | None) -> EvaluationConfig:
         episodes=int(raw.get("episodes", 20)),
         deterministic=bool(raw.get("deterministic", True)),
         save_episode_details=bool(raw.get("save_episode_details", True)),
-        real_num_envs=max(1, int(raw.get("real_num_envs", 1))),
-        real_base_port=(
-            None
-            if raw.get("real_base_port") in (None, "")
-            else int(raw.get("real_base_port"))
-        ),
     )
 
 
@@ -252,10 +248,12 @@ def summarize_eval_results(
         reward_std=_std(rewards),
         reward_min=min(rewards) if rewards else 0.0,
         reward_max=max(rewards) if rewards else 0.0,
+        reward_median=_median(rewards),
         survival_mean=_mean(survivals),
         survival_std=_std(survivals),
         survival_min=min(survivals) if survivals else 0.0,
         survival_max=max(survivals) if survivals else 0.0,
+        survival_median=_median(survivals),
         win_rate=_mean(wins),
         win_count=sum(wins),
         completed_sublevels_mean=_optional_mean(
@@ -277,6 +275,7 @@ def summarize_plant_stats(details: Iterable[EpisodeEvalResult]) -> dict[str, Any
     details = list(details)
     totals: dict[str, dict[str, Any]] = {}
     action_counts: dict[str, int] = {}
+    all_placements: list[dict[str, int]] = []
     for detail in details:
         diagnostics = detail.extra.get("diagnostics") or {}
         action_stats = diagnostics.get("action_stats") or {}
@@ -285,7 +284,15 @@ def summarize_plant_stats(details: Iterable[EpisodeEvalResult]) -> dict[str, Any
             action_stats.get("plant_success_by_type") or {},
         )
         plant_stats = detail.extra.get("plant_stats") or {}
-        for key, stat in plant_stats.items():
+        # Support both old flat dict and new nested {"plants": {...}, "placements": [...]} format
+        if isinstance(plant_stats, dict):
+            plants_data = plant_stats.get("plants", plant_stats)
+            placements = plant_stats.get("placements", [])
+        else:
+            plants_data = {}
+            placements = []
+        all_placements.extend(placements)
+        for key, stat in (plants_data or {}).items():
             plant_id = str(stat.get("plant_id", key))
             item = totals.setdefault(
                 plant_id,
@@ -322,10 +329,13 @@ def summarize_plant_stats(details: Iterable[EpisodeEvalResult]) -> dict[str, Any
             "survival_steps_mean": 0.0,
         }
 
-    return {
+    result = {
         key: totals[key]
         for key in sorted(totals, key=_plant_stats_sort_key)
     }
+    if all_placements:
+        result["_placements"] = all_placements
+    return result
 
 
 def summarize_diagnostics(details: Iterable[EpisodeEvalResult]) -> dict[str, Any]:
@@ -412,6 +422,11 @@ def elapsed_since(start_time: float) -> float:
 def _mean(values: Iterable[float]) -> float:
     values = list(values)
     return float(mean(values)) if values else 0.0
+
+
+def _median(values: Iterable[float]) -> float:
+    values = list(values)
+    return float(median(values)) if values else 0.0
 
 
 def _std(values: Iterable[float]) -> float:

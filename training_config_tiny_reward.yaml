@@ -127,8 +127,7 @@ observation_space:
 # These 4 keys are read directly in step() and default to non-zero — force to 0.
 # =============================================================================
 rewards:
-  reward_scale: 1              # reward scale
-  plant_lost_sun_cost_scale: 0.0  # 丢失植物按阳光成本惩罚（0=禁用, 1=全额阳光）
+  reward_scale: 0.01              # 小奖励模式：除以 100
   invalid_action: 0.0          # default -0.01
   wait_with_sun: 0.0           # default -0.02
   game_win: 0.0                # default +3.0
@@ -174,15 +173,6 @@ training:
 
     # Paper network architecture: 2 hidden layers of 2048 each  (same as baseline)
     ddqn_hidden_sizes: [2048, 2048]
-    use_dueling: false             # Dueling DQN 架构 (Wang et al., 2016)
-
-  # 定期评估：Worker 复用训练进程，数据不入训练 buffer
-  eval:
-    enabled: true
-    freq_episodes: 1000
-    episodes: 50
-    deterministic: true
-    save_episode_details: true
 
   env:
     max_steps: 10000

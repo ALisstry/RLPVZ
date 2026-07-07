@@ -6,13 +6,13 @@
 # and differ only in network architecture.
 #
 # Usage:
-#   .\.venv\Scripts\python.exe train.py --training_config training_config_baseline.yaml
+#   .\.venv\Scripts\python.exe train.py --training_config training_config.yaml
 
 # =============================================================================
 # Game Settings — Survival: Day  (same as baseline)
 # =============================================================================
 game:
-  game_mode_id: 1                # GAMEMODE_SURVIVAL_NORMAL_STAGE_1 = 生存白天
+  game_mode_id: 6                # GAMEMODE_SURVIVAL_HARD_DAY = 生存白天(困难)
   rows: 5                        # 5 rows
   cols: 9                        # 9 columns
   initial_sun: 50
@@ -127,6 +127,8 @@ observation_space:
 # These 4 keys are read directly in step() and default to non-zero — force to 0.
 # =============================================================================
 rewards:
+  reward_scale: 1              # reward scale
+  plant_lost_sun_cost_scale: 0.0  # 丢失植物按阳光成本惩罚（0=禁用, 1=全额阳光）
   invalid_action: 0.0          # default -0.01
   wait_with_sun: 0.0           # default -0.02
   game_win: 0.0                # default +3.0
@@ -144,6 +146,7 @@ training:
     ports: ""
     pids: ""
     auto_start: true
+    launch_toolkit: false         # PvZ Toolkit 默认不启动
     game_path: "gameobj/PlantsVsZombies.exe"
     wait_time: 3.0
     speed: 10.0
@@ -171,6 +174,15 @@ training:
 
     # Paper network architecture: 2 hidden layers of 2048 each  (same as baseline)
     ddqn_hidden_sizes: [2048, 2048]
+    use_dueling: true             # Dueling DQN 架构 (Wang et al., 2016)
+
+  # 定期评估：Worker 复用训练进程，数据不入训练 buffer
+  eval:
+    enabled: true
+    freq_episodes: 1000
+    episodes: 50
+    deterministic: true
+    save_episode_details: true
 
   env:
     max_steps: 10000

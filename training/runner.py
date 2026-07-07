@@ -2,13 +2,11 @@ from .checkpoint import CheckpointManager
 from .context import build_train_context
 from .evaluation import load_evaluation_config
 from .game_instances import (
-    prepare_eval_game_instances,
     prepare_game_instances,
     terminate_pvz_processes,
 )
 from .logging import setup_logging
 from .paths import build_run_paths
-from .game_instances import prepare_game_instances, terminate_pvz_processes
 from utils.train_utils import (
     load_training_config,
     print_metadata,
@@ -40,7 +38,7 @@ class TrainRunner:
             .get("training", {})
             .get("eval", {})
         )
-        eval_game_instances = prepare_eval_game_instances(self.args, eval_config)
+        eval_game_instances = []  # eval 复用训练 Worker，无需独立实例
 
         context = build_train_context(
             args=self.args,

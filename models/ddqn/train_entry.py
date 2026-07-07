@@ -141,7 +141,7 @@ class DDQNAlgorithm:
     def train(self, context) -> None:
         from .adapter import DDQNSpaceSpec, typed_onehot_state_dim
         from .async_trainer import AsyncDDQNTrainer
-        from .ddqn import QNetwork
+        from .ddqn import QNetwork, DuelingQNetwork
 
         require_execution(context.execution, "async_worker_pool", "DDQN")
         if context.game_instances is None:
@@ -180,7 +180,11 @@ class DDQNAlgorithm:
                 use_factored=use_factored,
             )
         else:
-            network = QNetwork(
+            use_dueling = getattr(context.args, "use_dueling", False)
+            NetworkCls = (
+                DuelingQNetwork if use_dueling else QNetwork
+            )
+            network = NetworkCls(
                 env,
                 learning_rate=context.args.ddqn_lr,
                 device=device,

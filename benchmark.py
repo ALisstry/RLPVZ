@@ -7,6 +7,7 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+from benchmark_plots import generate_benchmark_plots
 from models.ddqn.evaluate import evaluate_ddqn
 from models.ddqn.worker_pool import build_ddqn_env
 from models.ppo.evaluate import evaluate_ppo
@@ -22,7 +23,7 @@ from training.evaluation import (
     summarize_plant_stats,
     time_eval_run,
 )
-from training.game_instances import prepare_game_instances
+from training.game_instances import prepare_game_instances, terminate_pvz_processes
 from training.paths import get_cached_model_path
 from training.registry import available_algorithms
 from training.specs import build_base_eval_specs
@@ -112,7 +113,7 @@ def _random_worker_run(
                 )
             )
             print(
-                f"[Eval][Random][W{worker_id}] episode {episode_index}/{total_episodes} | "
+                f"[Benchmark][Random][W{worker_id}] episode {episode_index}/{total_episodes} | "
                 f"reward={total_reward:.2f} | "
                 f"survival={details[-1].survival:.0f} | "
                 f"win={details[-1].win} | "
@@ -163,7 +164,7 @@ def evaluate_random(
         )
     else:
         print(
-            f"[Eval][Random] Dispatching {episodes} episodes "
+            f"[Benchmark][Random] Dispatching {episodes} episodes "
             f"across {actual_workers} parallel workers"
         )
         with ThreadPoolExecutor(max_workers=actual_workers) as executor:
@@ -222,8 +223,8 @@ def main(argv=None):
         else eval_args.model or get_cached_model_path(args.algo)
     )
     algo_label = "random" if eval_args.random else args.algo
-    output_dir = eval_args.eval_output or _default_eval_output(algo_label)
-    episodes = eval_args.eval_episodes or eval_config.episodes
+    output_dir = eval_args.eval_output or _default_benchmark_output(algo_label)
+    episodes = eval_args.eval_episodes or 100
 
     env_spec, scenario_spec = build_base_eval_specs(args)
     _print_eval_metadata(
@@ -240,40 +241,43 @@ def main(argv=None):
         return
     _print_instances(instances)
 
-    if eval_args.random:
-        result = evaluate_random(
-            args=args,
-            instances=instances,
-            env_spec=env_spec,
-            scenario_spec=scenario_spec,
-            episodes=episodes,
-            num_workers=eval_args.eval_workers,
-        )
-    elif args.algo == "ddqn":
-        result = evaluate_ddqn(
-            args=args,
-            model_path=model_path,
-            instances=instances,
-            env_spec=env_spec,
-            scenario_spec=scenario_spec,
-            episodes=episodes,
-            num_workers=eval_args.eval_workers,
-        )
-    elif args.algo == "ppo":
-        result = evaluate_ppo(
-            args=args,
-            model_path=model_path,
-            instances=instances,
-            env_spec=env_spec,
-            scenario_spec=scenario_spec,
-            episodes=episodes,
-            device="auto",
-            num_workers=eval_args.eval_workers,
-        )
-    else:
-        raise NotImplementedError(
-            f"Offline evaluate is not implemented for algo: {args.algo}"
-        )
+    try:
+        if eval_args.random:
+            result = evaluate_random(
+                args=args,
+                instances=instances,
+                env_spec=env_spec,
+                scenario_spec=scenario_spec,
+                episodes=episodes,
+                num_workers=eval_args.eval_workers,
+            )
+        elif args.algo == "ddqn":
+            result = evaluate_ddqn(
+                args=args,
+                model_path=model_path,
+                instances=instances,
+                env_spec=env_spec,
+                scenario_spec=scenario_spec,
+                episodes=episodes,
+                num_workers=eval_args.eval_workers,
+            )
+        elif args.algo == "ppo":
+            result = evaluate_ppo(
+                args=args,
+                model_path=model_path,
+                instances=instances,
+                env_spec=env_spec,
+                scenario_spec=scenario_spec,
+                episodes=episodes,
+                device="auto",
+                num_workers=eval_args.eval_workers,
+            )
+        else:
+            raise NotImplementedError(
+                f"Offline evaluate is not implemented for algo: {args.algo}"
+            )
+    finally:
+        terminate_pvz_processes(instances, auto_start=args.auto_start)
 
     writer = EvaluationWriter(
         output_dir,
@@ -286,6 +290,15 @@ def main(argv=None):
         copied_model_path = None
     plant_stats_path = _write_plant_stats(result, output_dir)
     diagnostics_paths = _write_diagnostics(result, output_dir)
+
+    # ── Benchmark analysis plots ──
+    plot_paths = generate_benchmark_plots(
+        result=result,
+        output_dir=output_dir,
+        rows=scenario_spec.rows,
+        cols=scenario_spec.cols,
+    )
+
     _print_eval_result(result)
     print(f"Saved eval summary to {writer.csv_path}")
     if plant_stats_path:
@@ -294,10 +307,12 @@ def main(argv=None):
         print(f"Saved diagnostics to {', '.join(diagnostics_paths)}")
     if copied_model_path:
         print(f"Copied eval model to {copied_model_path}")
+    if plot_paths:
+        print(f"Saved benchmark plots to {', '.join(plot_paths)}")
 
 
 def _parse_eval_args(argv=None):
-    parser = argparse.ArgumentParser(description="Evaluate a trained real-env model")
+    parser = argparse.ArgumentParser(description="Benchmark a trained model on 困难草地第一关 (game_mode_id=6)")
     parser.add_argument(
         "--algo",
         type=str,
@@ -346,14 +361,14 @@ def _load_eval_config(args):
 def _apply_eval_instance_config(args, eval_args, eval_config):
     num_workers = max(1, int(getattr(eval_args, "eval_workers", 1)))
     args.num_envs = num_workers
-    if eval_config.real_base_port is not None:
-        args.base_port = eval_config.real_base_port
-        args.port = eval_config.real_base_port
+    # base_port is already set via get_args() from training_config.yaml.
+    # EvaluationConfig does not carry port overrides — ports come from
+    # the training config's training.args.base_port field.
 
 
-def _default_eval_output(algo):
+def _default_benchmark_output(algo):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join("eval_output", algo, timestamp)
+    return os.path.join("benchmark_output", algo, timestamp)
 
 
 def _optional_int(value):
@@ -380,6 +395,14 @@ def _write_plant_stats(result, output_dir):
     if not plant_stats:
         return None
 
+    # Filter to only dict entries (skip internal keys like "_placements")
+    items = [
+        v for v in (plant_stats.values() if isinstance(plant_stats, dict) else [])
+        if isinstance(v, dict)
+    ]
+    if not items:
+        return None
+
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, "plant_stats.csv")
     fieldnames = [
@@ -392,10 +415,7 @@ def _write_plant_stats(result, output_dir):
     with open(path, "w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
-        for item in sorted(
-            plant_stats.values(),
-            key=lambda value: int(value.get("plant_id", 0)),
-        ):
+        for item in sorted(items, key=lambda v: int(v.get("plant_id", 0))):
             writer.writerow({field: item.get(field) for field in fieldnames})
     return path
 
@@ -444,7 +464,7 @@ def _print_eval_metadata(args, model_path, output_dir, episodes,
                          env_spec, scenario_spec, random_mode=False):
     sep = "-" * 58
     print(f"\n{sep}")
-    print("  Evaluation Configuration")
+    print("  Benchmark Configuration")
     print(f"{sep}")
     algo_label = "random (baseline)" if random_mode else args.algo
     print(f"  {'Algorithm:':24s} {algo_label}")
@@ -467,7 +487,7 @@ def _print_eval_metadata(args, model_path, output_dir, episodes,
 
 
 def _print_instances(instances):
-    print("[Eval] Instances: " + ", ".join(
+    print("[Benchmark] Instances: " + ", ".join(
         f"pid={item['pid']} port={item['port']}" for item in instances
     ))
 
@@ -475,14 +495,16 @@ def _print_instances(instances):
 def _print_eval_result(result):
     sep = "-" * 58
     print(f"\n{sep}")
-    print("  Evaluation Result")
+    print("  Benchmark Result")
     print(f"{sep}")
     print(f"  {'Reward:':20s} mean={result.reward_mean:8.2f}  "
-          f"std={result.reward_std:8.2f}  min={result.reward_min:8.2f}  "
-          f"max={result.reward_max:8.2f}")
+          f"median={result.reward_median:8.2f}  "
+          f"std={result.reward_std:8.2f}  "
+          f"min={result.reward_min:8.2f}  max={result.reward_max:8.2f}")
     print(f"  {'Survival:':20s} mean={result.survival_mean:8.2f}  "
-          f"std={result.survival_std:8.2f}  min={result.survival_min:8.0f}  "
-          f"max={result.survival_max:8.0f}")
+          f"median={result.survival_median:8.2f}  "
+          f"std={result.survival_std:8.2f}  "
+          f"min={result.survival_min:8.0f}  max={result.survival_max:8.0f}")
     print(f"  {'Win rate:':20s} {result.win_count}/{result.episodes} "
           f"({100 * result.win_rate:.1f}%)")
     print(f"  {'Duration:':20s} {result.duration_sec:.2f}s")
@@ -519,11 +541,16 @@ def _print_plant_stats(result):
     if not plant_stats:
         return
 
+    # Filter to only dict entries (skip internal keys like "_placements")
+    items = [
+        v for v in (plant_stats.values() if isinstance(plant_stats, dict) else [])
+        if isinstance(v, dict)
+    ]
+    if not items:
+        return
+
     print(f"  {'Plant stats:':20s}")
-    rows = sorted(
-        plant_stats.values(),
-        key=lambda item: (-int(item.get("count_total", 0)), item.get("name", "")),
-    )
+    rows = sorted(items, key=lambda v: (-int(v.get("count_total", 0)), v.get("name", "")))
     for item in rows:
         print(
             f"    {item.get('name', item.get('plant_id')):18s} "

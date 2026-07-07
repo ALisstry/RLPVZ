@@ -608,16 +608,13 @@ class PVZEnv(gym.Env):
 
         # 从失败/奖励/游戏中退回主菜单
         if ui in (3, 4, 5):
-            if ui == 4:  # ZOMBIES_WON
-                for _ in range(10):
-                    self.hook_client.click_scaled(280, 370)
-                    time.sleep(0.3)
-                    if self.hook_client.get_ui() != 4:
-                        break
-            self.hook_client.back_to_main()
-            time.sleep(1.0)
-
-        ui = self.hook_client.get_ui()
+            if ui == 4:
+                self._dismiss_zombie_won()
+                ui = self.hook_client.get_ui()
+            if ui != 2:  # 已经是选卡界面则跳过主菜单往返
+                self.hook_client.back_to_main()
+                time.sleep(1.0)
+                ui = self.hook_client.get_ui()
 
         # 处理边缘状态
         if ui == 0:  # 加载中
@@ -754,32 +751,21 @@ class PVZEnv(gym.Env):
         # 显式处理结算画面：无论胜负，都先退回主菜单
         # step() 中的 _handle_game_failure 可能未运行或未覆盖所有情况
         if ui in (4, 5):  # ZOMBIES_WON / AWARD
-            screen = "失败" if ui == 4 else "奖励"
-            self._emit(
-                f"[PVZEnv] reset 检测到结算画面 (UI={ui}={screen})，退回主菜单...",
-                console_level=1, log_level=1,
-            )
-            # 点击画面通过结算
-            for attempt in range(10):
-                self.hook_client.click_scaled(280, 370)
-                time.sleep(0.3)
-                new_ui = self.hook_client.get_ui()
-                if new_ui not in (4, 5):
-                    ui = new_ui
-                    break
-            # 如果还在结算画面，强制返回主菜单
-            if ui in (4, 5):
-                self.hook_client.back_to_main()
-                time.sleep(1.5)
+            if ui == 4:
+                self._dismiss_zombie_won()
                 ui = self.hook_client.get_ui()
-            # 确保到达主菜单
-            if ui != 1:
+            if ui == 2:     # 已在选卡界面，跳过主菜单往返
+                pass
+            else:
                 self.hook_client.back_to_main()
                 time.sleep(1.0)
                 ui = self.hook_client.get_ui()
-            if ui != 1:
-                self._require_ui(1, timeout=5.0, error_message="从结算画面返回主菜单超时")
-                ui = 1
+                if ui != 1:
+                    self.hook_client.back_to_main()
+                    time.sleep(1.0)
+                    ui = self.hook_client.get_ui()
+                    if ui != 1:
+                        ui = 1
 
         if ui == -1:
             # 尝试直接用内存读取判断是否在游戏中
@@ -809,14 +795,9 @@ class PVZEnv(gym.Env):
             if ui == 7:
                 raise RuntimeError("关闭选项界面失败")
         
-        if ui == 4:  # ZOMBIES_WON
-            for attempt in range(10):
-                self.hook_client.click_scaled(280, 370)
-                time.sleep(0.3)
-                new_ui = self.hook_client.get_ui()
-                if new_ui != 4:
-                    ui = new_ui
-                    break
+        if ui == 4:
+            self._dismiss_zombie_won()
+            ui = self.hook_client.get_ui()
             if ui == 4:
                 ui = self._back_to_main_or_raise(timeout=2.0)
         
@@ -878,6 +859,7 @@ class PVZEnv(gym.Env):
         self._plant_appearances = {}
         self._plant_lifetime_steps = {}
         self._active_plant_starts = {}
+        self._plant_placements: list[tuple[int, int, int]] = []  # (plant_type, row, col)
         self._episode_win = None  # 重置胜负状态
         self._victory_printed = False  # 重置胜利打印标记
         self._no_zombie_steps = 0  # 重置无僵尸计数
@@ -1165,6 +1147,12 @@ class PVZEnv(gym.Env):
                 log_level=2,
             )
         
+        # 奖励缩放（小奖励开关）
+        reward_scale = self.rewards.get('reward_scale', 1.0)
+        if reward_scale != 1.0:
+            reward *= reward_scale
+            step_reward_details = {k: v * reward_scale for k, v in step_reward_details.items()}
+
         self.total_reward += reward
 
         if game_state:
@@ -1336,6 +1324,22 @@ class PVZEnv(gym.Env):
         reward = damage
         details['zombie_damage'] = damage
 
+        # ── 按阳光成本惩罚丢失的植物（独立于 use_shaped，始终生效）──
+        sun_cost_scale = self.rewards.get('plant_lost_sun_cost_scale', 0.0)
+        if sun_cost_scale != 0.0 and self._cached_game_state is not None:
+            prev_plants = [
+                p for p in self._cached_game_state.plants
+                if self._is_curriculum_cell_enabled(p.row, p.col)
+            ]
+            curr_ids = {p.index for p in active_plants}
+            lost = [p for p in prev_plants if p.index not in curr_ids]
+            if lost:
+                r_sun_lost = sum(
+                    PLANT_COST.get(p.type, 50) for p in lost
+                ) * sun_cost_scale * (-1.0)
+                reward += r_sun_lost
+                details['plant_sun_cost_lost'] = r_sun_lost
+
         # ── Optional shaped reward (opt-in via rewards.use_shaped: true) ──
         if not self.rewards.get('use_shaped', False):
             potential = self._calculate_potential(game_state)
@@ -1497,7 +1501,7 @@ class PVZEnv(gym.Env):
             reward += r_lost
             self.plants_lost += abs(plant_diff)
             details['plant_lost'] = r_lost
-            
+
             current_sunflowers = sum(1 for p in active_plants if p.type == PlantType.SUNFLOWER)
             sunflower_lost = self.sunflower_count - current_sunflowers
             if sunflower_lost > 0:
@@ -1538,22 +1542,58 @@ class PVZEnv(gym.Env):
         r, _ = self._compute_reward_debug(game_state)
         return r
     
+    def _restart_game_process(self):
+        """终极兜底：杀旧进程 → 启新进程 → 注入 DLL → 重连。"""
+        self.pvz = None
+        self.hook_client = None
+        if self.target_pid:
+            try:
+                psutil.Process(self.target_pid).terminate()
+            except Exception:
+                pass
+            time.sleep(1.0)
+        subprocess.Popen(
+            [self.pvz_exe_path], cwd=os.path.dirname(self.pvz_exe_path))
+        time.sleep(5.0)
+        self.target_pid = find_pvz_process()
+        inject_dll(pid=self.target_pid, port=self.hook_port)
+        time.sleep(1.0)
+        self.hook_client = HookClient(port=self.hook_port)
+        self.hook_client.connect()
+        self.hook_client.set_game_speed(min(self.game_speed, 10.0))
+        self.pvz = PVZInterface(
+            mode=InterfaceMode.HOOK,
+            hook_port=self.hook_port,
+            target_pid=self.target_pid,
+            connect_hook_client=False,
+        )
+        self.pvz.attach()
+        time.sleep(10.0)  # 等游戏初始化
+
+    def _dismiss_zombie_won(self):
+        """等待 ZOMBIES_WON 动画播完 → 点击 (400,400) → back_to_main → 重启。"""
+        time.sleep(5.0)
+        for _ in range(10):
+            self.hook_client.click_scaled(400, 400)
+            time.sleep(0.5)
+            if self.hook_client.get_ui() != 4:
+                time.sleep(5.0)
+                return
+        self.hook_client.back_to_main()
+        time.sleep(5.0)
+        if self.hook_client.get_ui() == 4:
+            self._restart_game_process()
+
     def _handle_game_failure(self):
         """处理游戏失败，返回主菜单"""
         if not self.hook_client:
             return
-        
-        time.sleep(0.5)
+
         ui = self.hook_client.get_ui()
-        
-        if ui == 4:  # ZOMBIES_WON
-            for attempt in range(10):
-                self.hook_client.click_scaled(280, 370)
-                time.sleep(0.3)
-                ui = self.hook_client.get_ui()
-                if ui != 4:
-                    break
-        
+        if ui == 4:
+            self._dismiss_zombie_won()
+            ui = self.hook_client.get_ui()
+
         if ui == 3 or ui == 4:
             self.hook_client.back_to_main()
             time.sleep(1.0)
@@ -2534,6 +2574,7 @@ class PVZEnv(gym.Env):
                 self._plant_appearances[plant_type] = (
                     self._plant_appearances.get(plant_type, 0) + 1
                 )
+                self._plant_placements.append(key)  # (plant_type, row, col)
 
         for key, start_step in list(self._active_plant_starts.items()):
             if key in current_keys:
@@ -2568,7 +2609,12 @@ class PVZEnv(gym.Env):
                 ),
                 "survival_unit": "env_step",
             }
-        return stats
+        # Include cell-level placement data for benchmark analysis
+        placements = [
+            {"plant_type": p[0], "row": p[1], "col": p[2]}
+            for p in self._plant_placements
+        ]
+        return {"plants": stats, "placements": placements}
 
     def _plant_name(self, plant_type: int) -> str:
         try:

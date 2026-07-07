@@ -72,7 +72,8 @@ def print_metadata(args, algorithm=None, run_paths=None):
 def write_run_metadata(context, algorithm, status: str = "initialized", error=None) -> str:
     os.makedirs(context.run_paths.run_dir, exist_ok=True)
     config_snapshot_path = _write_config_snapshot(context)
-    metadata_path = os.path.join(context.run_paths.run_dir, "run_metadata.json")
+    os.makedirs(os.path.join(context.run_paths.run_dir, "metrics"), exist_ok=True)
+    metadata_path = os.path.join(context.run_paths.run_dir, "metrics", "run_metadata.json")
     metadata = {
         "status": status,
         "updated_at": datetime.now().isoformat(timespec="seconds"),

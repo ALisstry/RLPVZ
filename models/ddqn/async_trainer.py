@@ -1,16 +1,17 @@
 import queue
 import os
+import time
 
 import numpy as np
 import torch
 
-from training.evaluation import BestEvaluationCheckpoint, EvaluationScheduler
+from training.evaluation import EvaluationScheduler
 from training.metrics import load_metric_events, load_training_snapshot
 from utils.train_utils import get_current_stage_name, load_training_config
 
-from .evaluate import evaluate_ddqn_state_dict
 from .ddqn import PrioritizedReplayBuffer
 from .learner import DDQNLearner
+from .live_plotter import LivePlotter
 from .monitoring import (
     DDQNConsoleReporter,
     DDQNMetricEmitter,
@@ -61,10 +62,12 @@ class AsyncDDQNTrainer:
         if context is not None and getattr(args, "auto_resume", True):
             snapshot = load_training_snapshot(context.run_paths.metrics_snapshot_path)
             metric_events = load_metric_events(context.run_paths.metrics_csv_path)
+        max_ep = max(1, int(getattr(args, "ddqn_episodes", 10000)))
         self.stats = DDQNTrainingStats.from_history(
             window=metric_window,
             snapshot=snapshot,
             events=metric_events,
+            max_episodes=max_ep,
         )
 
         self.transition_count = max(
@@ -136,7 +139,24 @@ class AsyncDDQNTrainer:
             1, int(getattr(args, "ddqn_plot_freq", 20))
         )  # rate-limit snapshot emission
         self._last_snapshot_ep = 0
+        self._dashboard_freq = max(
+            1, int(getattr(args, "ddqn_plot_freq", 20))
+        )
         self.best_eval_checkpoint = None
+
+        # ── Live training dashboard ──
+        dashboard_path = (
+            context.run_paths.dashboard_path
+            if context is not None
+            else os.path.join("models_output", "training_dashboard.png")
+        )
+        max_ep = max(1, int(getattr(args, "ddqn_episodes", 10000)))
+        self._live_plotter = LivePlotter(
+            save_path=dashboard_path,
+            window=100,
+            update_freq=self._dashboard_freq,
+            max_episodes=max_ep,
+        )
 
     def train(
         self,
@@ -209,11 +229,34 @@ class AsyncDDQNTrainer:
 
                     result = self.learner.update(self.buffer, beta=beta)
                     if result is not None:
-                        loss_value, tree_indices, td_errors = result
+                        loss_value, tree_indices, td_errors, q_stats, grad_norm = result
                         self.buffer.update_priorities(tree_indices, td_errors)
                         self.stats.record_loss(loss_value)
+                        mean_td = float(np.mean(np.abs(td_errors)))
+                        self.stats.record_td_error(mean_td)
                         self.metric_emitter.emit_loss(
                             loss_value=loss_value,
+                            transition_count=self.transition_count,
+                            episode_count=self.stats.episode_count,
+                        )
+                        self.metric_emitter.emit_td_error(
+                            td_error_mean=mean_td,
+                            transition_count=self.transition_count,
+                            episode_count=self.stats.episode_count,
+                        )
+                        self.stats.record_q_stats(
+                            mean_q=q_stats["mean_q"],
+                            max_q=q_stats["max_q"],
+                            entropy=q_stats["entropy"],
+                            advantage=q_stats["advantage"],
+                            grad_norm=grad_norm,
+                        )
+                        self.metric_emitter.emit_q_stats(
+                            mean_q=q_stats["mean_q"],
+                            max_q=q_stats["max_q"],
+                            entropy=q_stats["entropy"],
+                            advantage=q_stats["advantage"],
+                            grad_norm=grad_norm,
                             transition_count=self.transition_count,
                             episode_count=self.stats.episode_count,
                         )
@@ -232,6 +275,7 @@ class AsyncDDQNTrainer:
             self._drain_stats_queue(worker_pool)
             # Always save the final plot, even if training was interrupted.
             self._emit_training_metrics(force=True)
+            self._live_plotter.keep_open()
             self.reporter.print_finished(self.solved, self.stats.episode_count)
 
     def _drain_stats_queue(self, worker_pool):
@@ -256,7 +300,13 @@ class AsyncDDQNTrainer:
                 message["reward"],
                 message["iterations"],
                 bool(message.get("win") is True),
+                message.get("epsilon", 1.0),
             )
+
+            # Keep live dashboard in sync with latest epsilon
+            self._live_plotter.set_epsilon(message.get("epsilon", 1.0))
+            self._live_plotter.update(self.stats, self.stats.episode_count)
+
             self.metric_emitter.emit_episode(
                 message, episode_stats, self.transition_count
             )
@@ -282,6 +332,21 @@ class AsyncDDQNTrainer:
                 self.reporter.print_checkpoint(self.stats.episode_count)
 
             self._emit_training_metrics()
+
+            # 每隔 1000 episode 自动保存指标快照副本
+            if (self.stats.episode_count > 0
+                    and self.stats.episode_count % 1000 == 0
+                    and self.context is not None):
+                try:
+                    import shutil
+                    self._emit_training_metrics(force=True)
+                    src = self.context.run_paths.metrics_snapshot_path
+                    dst = src.replace(
+                        ".json", f"_ep{self.stats.episode_count:06d}.json"
+                    )
+                    shutil.copy2(src, dst)
+                except Exception:
+                    pass
 
             progress_line = episode_stats.progress_line
             self.reporter.print_progress(episode_stats, message["worker_id"])
@@ -315,7 +380,8 @@ class AsyncDDQNTrainer:
                 self.eval_scheduler is not None
                 and self.eval_scheduler.should_run(self.stats.episode_count)
             ):
-                self._run_strict_eval()
+                self._run_worker_eval(worker_pool)
+                return  # 重新进入主循环，清空队列后恢复训练
 
     def _emit_training_metrics(self, force=False):
         ep = self.stats.episode_count
@@ -323,6 +389,85 @@ class AsyncDDQNTrainer:
             return
         self._last_snapshot_ep = ep
         self.metric_emitter.emit_snapshot(self.stats.to_snapshot(force=force))
+
+    def _run_worker_eval(self, worker_pool):
+        """使用训练 Worker 进程运行评估回合（eps=0），数据不入训练 buffer。"""
+        eval_episodes = self.eval_scheduler.config.episodes
+
+        # 设置 eval_mode + 计数器，Worker 在下次循环迭代时自动进入评估模式
+        worker_pool.eval_slots.value = eval_episodes
+        worker_pool.eval_done.value = eval_episodes
+        worker_pool.eval_mode.set()
+        print("[Eval] 开始评估，等待 Worker 收集结果...", flush=True)
+
+        # 收集 eval 结果
+        eval_rewards = []
+        eval_wins = []
+        eval_iterations = []
+        start_time = time.perf_counter()
+        while worker_pool.eval_done.value > 0:
+            try:
+                message = worker_pool.stats_queue.get(timeout=120.0)
+            except queue.Empty:
+                print("[Eval] 等待 eval episode 超时", flush=True)
+                break
+
+            if message["type"] == "eval_episode":
+                eval_rewards.append(message["reward"])
+                eval_wins.append(message.get("win", False))
+                eval_iterations.append(message.get("iterations", 0))
+                collected = len(eval_rewards)
+                win_mark = "✓" if message.get("win") else " "
+                print(
+                    f"[Eval {collected}/{eval_episodes}]  "
+                    f"reward={message['reward']:.0f}  "
+                    f"iter={message.get('iterations', 0)}  "
+                    f"win={win_mark}  "
+                    f"worker={message.get('worker_id', '?')}",
+                    flush=True,
+                )
+            elif message["type"] == "error":
+                self.worker_status.handle_error(message)
+            elif message["type"] == "warning":
+                self.worker_status.handle_warning(message)
+            # 忽略其他类型消息（训练 episode 等）
+
+        # 关闭 eval_mode，Worker 自动切回训练
+        worker_pool.eval_mode.clear()
+        duration = time.perf_counter() - start_time
+
+        # 记录评估结果
+        if eval_rewards:
+            mean_reward = sum(eval_rewards) / len(eval_rewards)
+            win_rate = sum(1 for w in eval_wins if w) / len(eval_wins)
+            mean_iterations = sum(eval_iterations) / len(eval_iterations)
+            self.stats.record_eval_result(
+                episode=self.stats.episode_count,
+                mean_reward=mean_reward,
+                win_rate=win_rate,
+            )
+            stage_name = (
+                get_current_stage_name(self.context.curriculum)
+                if self.context else ""
+            )
+            stage_text = f" | stage={stage_name}" if stage_name else ""
+            print(
+                f"[Eval] Episode {self.stats.episode_count}{stage_text} | "
+                f"episodes={len(eval_rewards)} | "
+                f"reward={mean_reward:.2f} | "
+                f"survival={mean_iterations:.1f} | "
+                f"win_rate={win_rate:.2%} | "
+                f"duration={duration:.1f}s",
+                flush=True,
+            )
+        else:
+            print(
+                f"[Eval] Episode {self.stats.episode_count} | "
+                "未收集到任何 eval 结果",
+                flush=True,
+            )
+
+        print("[Eval] 评估结束，恢复训练", flush=True)
 
     def _update_curriculum(self, worker_pool, message, episode_stats):
         if self.context is None:
@@ -340,37 +485,3 @@ class AsyncDDQNTrainer:
         else:
             worker_pool.acknowledge_episode(int(message["worker_id"]))
 
-    def _run_strict_eval(self):
-        if self.context is None or not self.context.eval_game_instances:
-            return
-        stage_name = get_current_stage_name(self.context.curriculum)
-        try:
-            eval_result = evaluate_ddqn_state_dict(
-                args=self.args,
-                state_dict=self.learner.state_dict_cpu(),
-                instances=self.context.eval_game_instances,
-                env_spec=self.context.env_spec,
-                scenario_spec=self.context.scenario_spec,
-                episodes=self.context.eval_config.episodes,
-                episode=self.stats.episode_count,
-                step=self.transition_count,
-                stage_name=stage_name,
-            )
-            self.context.evaluation_writer.write(eval_result)
-            if self.best_eval_checkpoint is None:
-                self.best_eval_checkpoint = BestEvaluationCheckpoint(
-                    self.context.evaluation_writer.output_dir,
-                    model_filename="best_model.pt",
-                )
-            saved_path = self.best_eval_checkpoint.maybe_save(
-                eval_result,
-                lambda path: torch.save(self.learner.state_dict_cpu(), path),
-            )
-            if saved_path is not None:
-                print(f"[Eval] New best model saved to {saved_path}", flush=True)
-            self.metric_emitter.emit_strict_eval(
-                eval_result, self.transition_count
-            )
-            self.reporter.print_strict_eval(eval_result, stage_name)
-        except Exception as exc:
-            print(f"\n[Eval] strict eval failed: {exc}", flush=True)

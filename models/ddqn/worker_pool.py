@@ -1,9 +1,10 @@
 import queue
+import time
 
 import numpy as np
 
 from .threshold import Threshold
-from .ddqn import QNetwork
+from .ddqn import QNetwork, DuelingQNetwork
 from training.logging import setup_worker_logging
 from training.worker_pool import AsyncWorkerPool
 
@@ -51,6 +52,9 @@ class DDQNWorkerPool(AsyncWorkerPool):
         self.stats_queue = self.make_queue(maxsize=1024)
         self.weight_queues = self.make_per_worker_queues(maxsize=1)
         self.scenario_queues = self.make_per_worker_queues(maxsize=1)
+        self.eval_mode = self.ctx.Event()              # set → eval mode; clear → training mode
+        self.eval_slots = self.ctx.Value('i', 0)     # remaining eval episodes to grab
+        self.eval_done = self.ctx.Value('i', 0)      # remaining eval episodes to complete
 
     def start(self):
         self.start_workers(
@@ -68,6 +72,9 @@ class DDQNWorkerPool(AsyncWorkerPool):
                 self.env_spec,
                 self.scenario_spec,
                 self.initial_global_episode,
+                self.eval_mode,
+                self.eval_slots,
+                self.eval_done,
             ),
             label="DDQN",
         )
@@ -173,8 +180,12 @@ def ddqn_worker_main(
     env_spec,
     scenario_spec,
     initial_global_episode: int = 0,
+    eval_mode=None,
+    eval_slots=None,
+    eval_done=None,
 ):
     env = None
+    _was_eval = False  # true after eval_mode clears — need to reset for training
     try:
         setup_worker_logging(args)
         env = _build_worker_env(args, instance, worker_id, env_spec, scenario_spec)
@@ -195,7 +206,9 @@ def ddqn_worker_main(
                 use_factored=use_factored,
             )
         else:
-            network = QNetwork(
+            use_dueling = getattr(args, "use_dueling", False)
+            WorkerNet = DuelingQNetwork if use_dueling else QNetwork
+            network = WorkerNet(
                 env,
                 learning_rate=args.ddqn_lr,
                 device="cpu",
@@ -220,12 +233,87 @@ def ddqn_worker_main(
             end_epsilon=0.05,
         )
 
+        def _try_eval_episode():
+            """抢 eval slot 跑一局评估（eps=0, 不发 transition）。
+            返回 True 表示跑了一局（或尝试了），False 表示无 slot 可抢。"""
+            if eval_slots is None:
+                return False
+            with eval_slots.get_lock():
+                if eval_slots.value > 0:
+                    eval_slots.value -= 1
+                else:
+                    return False
+
+            episode_reward_eval = 0.0
+            win_eval = False
+            iterations_eval = 0
+            try:
+                # env.reset() 自动处理所有 UI 状态（游戏中/主菜单/选卡/结算等）
+                state_eval = env.reset()
+                done = False
+                while not done and not stop_event.is_set():
+                    # 主线程可能提前结束 eval，检查 eval_mode 是否仍有效
+                    if eval_mode is not None and not eval_mode.is_set():
+                        break
+                    mask = np.array(env.mask_available_actions(), dtype=bool)
+                    action = network.decide_action(state_eval, mask, epsilon=0.0)
+                    next_state, reward, done, info = env.step(action)
+                    episode_reward_eval += reward
+                    state_eval = next_state
+                iterations_eval = env.steps
+                win_eval = bool(info.get("win") is True)
+            except Exception as exc:
+                stats_queue.put({
+                    "type": "warning",
+                    "worker_id": worker_id,
+                    "port": instance["port"],
+                    "pid": instance["pid"],
+                    "message": f"eval episode 失败: {repr(exc)}",
+                })
+            finally:
+                # 回到主菜单，为下一局 eval 或训练做准备
+                try:
+                    env.env.hook_client.back_to_main()
+                except Exception:
+                    pass
+                with eval_done.get_lock():
+                    eval_done.value -= 1
+
+            stats_queue.put({
+                "type": "eval_episode",
+                "worker_id": worker_id,
+                "reward": episode_reward_eval,
+                "iterations": iterations_eval,
+                "win": win_eval,
+                "port": instance["port"],
+                "pid": instance["pid"],
+            })
+            return True
+
         state = _reset_env_with_retry(env, worker_id, instance, stats_queue, stop_event)
         episode_reward = 0.0
         local_episode = 0
 
         global_episode = initial_global_episode
         while not stop_event.is_set():
+            # ── 评估模式：抢 slot 跑评估，拿不到就等 ──
+            if eval_mode is not None and eval_mode.is_set():
+                _was_eval = True
+                if _try_eval_episode():
+                    continue
+                time.sleep(0.1)   # 无 slot，等待其他 Worker 跑完
+                continue
+
+            # ── 刚退出评估模式：重置环境，回到训练 ──
+            if _was_eval:
+                _was_eval = False
+                state = _reset_env_with_retry(
+                    env, worker_id, instance, stats_queue, stop_event
+                )
+                episode_reward = 0.0
+                continue
+
+            # ── 正常训练 ──
             _consume_scenario_queue(env, scenario_queue)
             latest_weights = _drain_latest_weights(weights_queue)
             if latest_weights is not None:

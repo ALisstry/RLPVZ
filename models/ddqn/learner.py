@@ -29,7 +29,8 @@ class DDQNLearner:
         """Double-DQN loss, optionally with PER importance-sampling weights.
 
         Returns:
-            (loss, td_errors) — *loss* is scalar, *td_errors* is (B, 1) numpy array.
+            (loss, td_errors, q_stats) — *loss* is scalar, *td_errors* is
+            (B, 1) numpy array, *q_stats* is a dict with mean_q, max_q, entropy.
         """
         states, actions, rewards, dones, next_states, masks, next_masks = [
             item for item in batch
@@ -45,7 +46,25 @@ class DDQNLearner:
         )
         dones_t = torch.as_tensor(dones, dtype=torch.bool, device=self.network.device)
 
-        qvals = torch.gather(self.network.get_qvals(states), 1, actions_t)
+        all_qvals = self.network.get_qvals(states)                # (B, n_actions)
+        qvals = torch.gather(all_qvals, 1, actions_t)             # (B, 1)
+
+        # ── Q-value statistics (detached, no gradient) ──
+        with torch.no_grad():
+            mean_q = float(qvals.mean().cpu().item())
+            max_q = float(all_qvals.max(dim=1).values.mean().cpu().item())
+            # Entropy of softmax over Q-values — measures policy certainty
+            probs = F.softmax(all_qvals, dim=1)                   # (B, n_actions)
+            log_probs = torch.log(probs + 1e-12)
+            entropy = float(-(probs * log_probs).sum(dim=1).mean().cpu().item())
+            # Advantage: how much better the chosen action is vs mean
+            advantage = float(
+                (qvals - all_qvals.mean(dim=1, keepdim=True)).mean().cpu().item()
+            )
+        q_stats = {
+            "mean_q": mean_q, "max_q": max_q,
+            "entropy": entropy, "advantage": advantage,
+        }
 
         next_masks = np.array(next_masks, dtype=bool)
         with torch.no_grad():
@@ -78,10 +97,10 @@ class DDQNLearner:
         else:
             loss = elementwise_loss.mean()
 
-        return loss, td_errors.cpu().numpy()
+        return loss, td_errors.cpu().numpy(), q_stats
 
     def update(self, replay_buffer, beta: float = 0.4):
-        """Single gradient step.  Returns ``(loss, tree_indices, td_errors)``
+        """Single gradient step.  Returns ``(loss, tree_indices, td_errors, q_stats)``
         so the caller can update PER priorities, or ``None`` on OOM skip."""
         self.network.optimizer.zero_grad(set_to_none=True)
         batch, tree_indices, is_weights = replay_buffer.sample_batch(
@@ -89,15 +108,18 @@ class DDQNLearner:
         )
 
         try:
-            loss, td_errors = self.calculate_loss(batch, is_weights)
+            loss, td_errors, q_stats = self.calculate_loss(batch, is_weights)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=10.0)
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                self.network.parameters(), max_norm=10.0,
+            )
+            grad_norm = float(total_norm.item()) if torch.is_tensor(total_norm) else float(total_norm)
             self.network.optimizer.step()
             return (
                 float(loss.detach().cpu().item())
                 if self.network.device == "cuda"
                 else float(loss.detach().item())
-            ), tree_indices, td_errors
+            ), tree_indices, td_errors, q_stats, grad_norm
         except (RuntimeError, torch.AcceleratorError) as exc:
             message = str(exc).lower()
             is_oom = "out of memory" in message or "cudaerrormemoryallocation" in message

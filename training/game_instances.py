@@ -1,7 +1,6 @@
 import os
 import subprocess
 import time
-from copy import copy
 
 import psutil
 
@@ -28,10 +27,11 @@ def prepare_game_instances(args):
             print("[警告] auto_start 关闭时需要手动启动所有 PVZ 进程或使用 --pids")
         return instances
 
-    # Auto-start: 先启动 PvZ Toolkit，再根据实例数自动启动游戏进程并注入 DLL
-    _launch_toolkit()
+    # Auto-start: 可选用启动 PvZ Toolkit，再根据实例数自动启动游戏进程并注入 DLL
+    if getattr(args, "launch_toolkit", False):
+        _launch_toolkit()
 
-    multi = len(instances) > 1
+    multi = len(instances) > 1 or getattr(args, "_force_new_instance", False)
     known_pids = set(list_pvz_processes())
     for i, instance in enumerate(instances):
         label = f"[{i + 1}/{len(instances)}]"
@@ -57,22 +57,6 @@ def prepare_game_instances(args):
     )
     return instances
 
-
-def prepare_eval_game_instances(args, eval_config):
-    if not getattr(eval_config, "enabled", False):
-        return []
-    eval_args = copy(args)
-    eval_args.num_envs = max(1, int(getattr(eval_config, "real_num_envs", 1)))
-    if getattr(eval_config, "real_base_port", None) is not None:
-        eval_args.base_port = int(eval_config.real_base_port)
-        eval_args.port = int(eval_config.real_base_port)
-        eval_args.ports = ""
-    print(
-        "[Eval] 准备 real eval 实例: "
-        f"num_envs={eval_args.num_envs}, "
-        f"base_port={getattr(eval_args, 'base_port', getattr(eval_args, 'port', None))}"
-    )
-    return prepare_game_instances(eval_args) or []
 
 
 def _launch_game_and_inject(
