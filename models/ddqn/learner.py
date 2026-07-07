@@ -61,9 +61,21 @@ class DDQNLearner:
             advantage = float(
                 (qvals - all_qvals.mean(dim=1, keepdim=True)).mean().cpu().item()
             )
+            # ── Differential / wait-baseline statistics ──
+            # Always meaningful: Q(s, wait) is the value of doing nothing,
+            # Δ(s,a) = Q(s,a) - Q(s,wait) is how much better action a is.
+            q_wait = all_qvals[:, -1]                              # (B,)
+            delta_all = all_qvals - q_wait.unsqueeze(-1)           # (B, n_actions)
+            # delta_all[:, -1] ≡ 0 by construction for DifferentialQNetwork
+            # and ≈ 0 for other networks (Q(s,wait) - Q(s,wait) = 0)
+            q_wait_mean = float(q_wait.mean().cpu().item())
+            delta_mean = float(delta_all.mean().cpu().item())
+            delta_max = float(delta_all.max(dim=1).values.mean().cpu().item())
         q_stats = {
             "mean_q": mean_q, "max_q": max_q,
             "entropy": entropy, "advantage": advantage,
+            "q_wait": q_wait_mean, "delta_mean": delta_mean,
+            "delta_max": delta_max,
         }
 
         next_masks = np.array(next_masks, dtype=bool)

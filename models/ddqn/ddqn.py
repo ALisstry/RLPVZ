@@ -158,6 +158,113 @@ class DuelingQNetwork(QNetwork):
         return qvals
 
 
+class DifferentialQNetwork(QNetwork):
+    """Differential Q-Network: Q(s,a) = Q(s,wait) + Δ(s,a),  Δ(s,wait) ≡ 0.
+
+    Instead of directly estimating Q(s,a) for all actions, this network learns:
+      - Q(s, wait)  — the baseline value of doing nothing (a scalar)
+      - Δ(s, a)     — how much better action a is compared to waiting
+
+    The final Q-values are computed as::
+
+        Q(s, a) = Q(s, wait) + Δ(s, a)      for all a
+        Δ(s, wait) = 0                       (by definition)
+
+    This reparameterisation is mathematically equivalent to standard Q-learning
+    but encodes the prior that "wait" is the default action in PvZ — most of the
+    time the agent should wait, and only occasionally plant something.  The
+    network can focus its capacity on learning *when* and *what* to plant rather
+    than modelling the absolute value of every (state, action) pair.
+
+    Architecture
+    ------------
+    Shared trunk (all hidden layers except the last) → two heads:
+
+        trunk(s) ─┬─ wait_head(s)  → Q_wait ∈ R
+                  └─ delta_head(s) → Δ(s, ·) ∈ R^{n_actions},  Δ[:, wait] = 0
+
+    Q(s, a) = Q_wait + Δ[:, a]
+    """
+
+    def __init__(self, env, learning_rate=1e-3, device="cpu",
+                 hidden_sizes=None, n_inputs_override=None,
+                 create_optimizer=True):
+        super().__init__(
+            env, learning_rate=learning_rate, device=device,
+            hidden_sizes=hidden_sizes, n_inputs_override=n_inputs_override,
+            create_optimizer=False,  # build manually below
+        )
+        if hidden_sizes is None:
+            hidden_sizes = [256, 128]
+
+        # Split: trunk = all but last hidden layer; last_h = branching point
+        if len(hidden_sizes) >= 2:
+            trunk_sizes = hidden_sizes[:-1]
+            branch_in = hidden_sizes[-1]
+        else:
+            trunk_sizes = []
+            branch_in = hidden_sizes[0]
+
+        # ── Shared trunk ──
+        trunk_layers = []
+        prev = self.n_inputs
+        for h in trunk_sizes:
+            trunk_layers.append(nn.Linear(prev, h, bias=True))
+            trunk_layers.append(nn.LeakyReLU())
+            prev = h
+        self.trunk = nn.Sequential(*trunk_layers) if trunk_layers else nn.Identity()
+        trunk_out = prev if trunk_sizes else self.n_inputs
+
+        # ── Wait baseline head: Q(s, wait) ──
+        self.wait_head = nn.Sequential(
+            nn.Linear(trunk_out, branch_in, bias=True),
+            nn.LeakyReLU(),
+            nn.Linear(branch_in, 1, bias=True),
+        )
+
+        # ── Delta head: Δ(s, a) for all actions ──
+        self.delta_head = nn.Sequential(
+            nn.Linear(trunk_out, branch_in, bias=True),
+            nn.LeakyReLU(),
+            nn.Linear(branch_in, self.n_outputs, bias=True),
+        )
+
+        # Replace self.network (from parent) with None so it's not used
+        self.network = None
+
+        # Cache the wait action index for the forward pass
+        self._wait_idx = self.n_outputs - 1
+
+        if self.device == "cuda":
+            self.to("cuda")
+
+        if create_optimizer:
+            self.optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, self.parameters()),
+                lr=self.learning_rate,
+            )
+
+    def get_qvals(self, state):
+        if isinstance(state, (list, tuple)):
+            state = np.array(state)
+        state_t = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        single = state_t.dim() == 1
+        if single:
+            state_t = state_t.unsqueeze(0)            # (D,) → (1, D)
+
+        shared = self.trunk(state_t)
+        q_wait = self.wait_head(shared)               # (B, 1)
+        delta = self.delta_head(shared)               # (B, n_actions)
+
+        # Δ(s, wait) = 0 by definition
+        delta[:, self._wait_idx] = 0.0
+
+        qvals = q_wait + delta                        # (B, n_actions)
+        if single:
+            qvals = qvals.squeeze(0)                  # (1, A) → (A,)
+        return qvals
+
+
 class SumTree:
     """Binary sum-tree for O(log N) priority-based sampling.
 

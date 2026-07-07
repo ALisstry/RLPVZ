@@ -62,6 +62,9 @@ class DDQNTrainingStats:
         self.training_entropy = []
         self.training_advantage = []
         self.training_grad_norm = []
+        self.training_q_wait = []       # Q(s, wait) — baseline "do nothing" value
+        self.training_delta_mean = []   # mean Δ(s,a) = mean(Q(s,a) - Q(s,wait))
+        self.training_delta_max = []    # max Δ(s,a) — best action vs wait
         self.eval_steps = []       # episode numbers where eval ran
         self.eval_rewards = []     # mean reward per eval round
         self.eval_win_rates = []   # win rate per eval round
@@ -85,6 +88,9 @@ class DDQNTrainingStats:
             stats.training_max_q = list(snapshot.max_q_values)
             stats.training_entropy = list(snapshot.entropy_values)
             stats.training_advantage = list(snapshot.advantage_values)
+            stats.training_q_wait = list(getattr(snapshot, "q_wait_values", []))
+            stats.training_delta_mean = list(getattr(snapshot, "delta_mean_values", []))
+            stats.training_delta_max = list(getattr(snapshot, "delta_max_values", []))
             stats.eval_steps = list(snapshot.eval_steps)
             stats.eval_rewards = list(snapshot.eval_rewards)
             stats.training_grad_norm = list(snapshot.grad_norm_values)
@@ -180,14 +186,20 @@ class DDQNTrainingStats:
             self.training_td_errors = self.training_td_errors[-self._MAX_LOSS_HISTORY:]
 
     def record_q_stats(self, mean_q: float, max_q: float, entropy: float,
-                       advantage: float = 0.0, grad_norm: float = 0.0):
+                       advantage: float = 0.0, grad_norm: float = 0.0,
+                       q_wait: float = 0.0, delta_mean: float = 0.0,
+                       delta_max: float = 0.0):
         self.training_mean_q.append(float(mean_q))
         self.training_max_q.append(float(max_q))
         self.training_entropy.append(float(entropy))
         self.training_advantage.append(float(advantage))
         self.training_grad_norm.append(float(grad_norm))
+        self.training_q_wait.append(float(q_wait))
+        self.training_delta_mean.append(float(delta_mean))
+        self.training_delta_max.append(float(delta_max))
         for attr in ("training_mean_q", "training_max_q", "training_entropy",
-                     "training_advantage", "training_grad_norm"):
+                     "training_advantage", "training_grad_norm",
+                     "training_q_wait", "training_delta_mean", "training_delta_max"):
             values = getattr(self, attr)
             if len(values) > self._MAX_LOSS_HISTORY:
                 setattr(self, attr, values[-self._MAX_LOSS_HISTORY:])
@@ -242,10 +254,12 @@ class DDQNMetricEmitter:
         )
 
     def emit_q_stats(self, mean_q, max_q, entropy, advantage, grad_norm,
-                     transition_count, episode_count):
+                     transition_count, episode_count,
+                     q_wait=0.0, delta_mean=0.0, delta_max=0.0):
         for name, value in (
             ("mean_q", mean_q), ("max_q", max_q), ("entropy", entropy),
             ("advantage", advantage), ("grad_norm", grad_norm),
+            ("q_wait", q_wait), ("delta_mean", delta_mean), ("delta_max", delta_max),
         ):
             self.emit(
                 name=name, value=value,

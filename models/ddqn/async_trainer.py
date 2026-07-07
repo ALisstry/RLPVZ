@@ -250,6 +250,9 @@ class AsyncDDQNTrainer:
                             entropy=q_stats["entropy"],
                             advantage=q_stats["advantage"],
                             grad_norm=grad_norm,
+                            q_wait=q_stats.get("q_wait", 0.0),
+                            delta_mean=q_stats.get("delta_mean", 0.0),
+                            delta_max=q_stats.get("delta_max", 0.0),
                         )
                         self.metric_emitter.emit_q_stats(
                             mean_q=q_stats["mean_q"],
@@ -259,6 +262,9 @@ class AsyncDDQNTrainer:
                             grad_norm=grad_norm,
                             transition_count=self.transition_count,
                             episode_count=self.stats.episode_count,
+                            q_wait=q_stats.get("q_wait", 0.0),
+                            delta_mean=q_stats.get("delta_mean", 0.0),
+                            delta_max=q_stats.get("delta_max", 0.0),
                         )
 
                 if self.transition_count % network_sync_frequency == 0:

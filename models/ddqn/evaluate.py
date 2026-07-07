@@ -14,7 +14,7 @@ from training.evaluation import (
 )
 
 from .adapter import typed_onehot_state_dim
-from .ddqn import QNetwork, DuelingQNetwork
+from .ddqn import QNetwork, DuelingQNetwork, DifferentialQNetwork
 from .train_entry import _parse_hidden_sizes
 from .worker_pool import build_ddqn_env
 
@@ -264,18 +264,36 @@ def _build_eval_envs(args, instances, env_spec, scenario_spec):
 
 def _build_network(args, env):
     hidden_sizes = _parse_hidden_sizes(getattr(args, "ddqn_hidden_sizes", None))
-    use_dueling = getattr(args, "use_dueling", False)
-    EvalNet = DuelingQNetwork if use_dueling else QNetwork
-    network = EvalNet(
-        env,
-        learning_rate=args.ddqn_lr,
-        device="cpu",
-        hidden_sizes=hidden_sizes,
-        n_inputs_override=typed_onehot_state_dim(
-            env.rows, env.cols, env.num_cards
-        ),
-        create_optimizer=False,
-    )
+    use_cnn = getattr(args, "use_cnn", False)
+    if use_cnn:
+        from .cnn_network import CNNQNetwork
+        use_factored = getattr(args, "use_factored", False)
+        network = CNNQNetwork(
+            env,
+            learning_rate=args.ddqn_lr,
+            device="cpu",
+            create_optimizer=False,
+            use_factored=use_factored,
+        )
+    else:
+        use_differential = getattr(args, "use_differential", False)
+        use_dueling = getattr(args, "use_dueling", False)
+        if use_differential:
+            EvalNet = DifferentialQNetwork
+        elif use_dueling:
+            EvalNet = DuelingQNetwork
+        else:
+            EvalNet = QNetwork
+        network = EvalNet(
+            env,
+            learning_rate=args.ddqn_lr,
+            device="cpu",
+            hidden_sizes=hidden_sizes,
+            n_inputs_override=typed_onehot_state_dim(
+                env.rows, env.cols, env.num_cards
+            ),
+            create_optimizer=False,
+        )
     return network
 
 

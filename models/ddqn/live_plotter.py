@@ -101,7 +101,8 @@ class LivePlotter:
         self._plot_metric(0, 1, d["loss"], "Training Loss (MSE)",
                           "Update Step", "Loss", color="tab:red")
 
-        self._plot_q_values(0, 2, d["q_mean"], d["q_max"])
+        self._plot_q_values(0, 2, d["q_mean"], d["q_max"],
+                           d["q_wait"], d["delta_mean"], d["delta_max"])
 
         self._plot_metric(0, 3, d["td_error"], "TD Error",
                           "Update Step", "|TD Error|", color="tab:purple")
@@ -160,6 +161,9 @@ class LivePlotter:
             grad_norm = self._to_array(stats.training_grad_norm)
             q_mean = self._to_array(stats.training_mean_q)
             q_max = self._to_array(stats.training_max_q)
+            q_wait = self._to_array(stats.training_q_wait)
+            delta_mean = self._to_array(stats.training_delta_mean)
+            delta_max = self._to_array(stats.training_delta_max)
             td_error = self._to_array(stats.training_td_errors)
             mean_rewards_list = self._to_array(stats.mean_training_rewards)
             epsilon_hist = self._to_array(getattr(stats, "training_epsilons", None))
@@ -182,6 +186,9 @@ class LivePlotter:
                 "grad_norm": grad_norm,
                 "q_mean": q_mean,
                 "q_max": q_max,
+                "q_wait": q_wait,
+                "delta_mean": delta_mean,
+                "delta_max": delta_max,
                 "td_error": td_error,
                 "epsilon_hist": epsilon_hist,
                 "mean_rewards_list": mean_rewards_list,
@@ -235,7 +242,7 @@ class LivePlotter:
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3)
 
-    def _plot_q_values(self, row, col, q_mean, q_max):
+    def _plot_q_values(self, row, col, q_mean, q_max, q_wait, delta_mean, delta_max):
         ax = self.axes[row, col]
         ax.clear()
         has_data = False
@@ -249,14 +256,33 @@ class LivePlotter:
             ax.plot(sx, sy, color="tab:orange", linewidth=1.8,
                     label=f"Max Q (MA{self.window})")
             has_data = True
+        # ── Differential Q: Q_wait (baseline "do nothing" value) ──
+        if q_wait is not None and len(q_wait) > 0:
+            sx, sy = _rolling_mean(q_wait, self.window)
+            ax.plot(sx, sy, color="tab:green", linewidth=1.5, linestyle="--",
+                    label=f"Q(wait) (MA{self.window})")
+            has_data = True
+        # ── Delta mean: average advantage over waiting ──
+        if delta_mean is not None and len(delta_mean) > 0:
+            sx, sy = _rolling_mean(delta_mean, self.window)
+            ax.plot(sx, sy, color="tab:red", linewidth=1.5, linestyle=":",
+                    label=f"Δ mean (MA{self.window})")
+            ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
+            has_data = True
+        # ── Delta max: best action advantage over waiting ──
+        if delta_max is not None and len(delta_max) > 0:
+            sx, sy = _rolling_mean(delta_max, self.window)
+            ax.plot(sx, sy, color="tab:purple", linewidth=1.2, linestyle="-.",
+                    label=f"Δ max (MA{self.window})")
+            has_data = True
         if not has_data:
             ax.text(0.5, 0.5, "No data yet", transform=ax.transAxes,
                     ha="center", va="center", fontsize=10, color="gray")
-        ax.set_title("Q-Value Statistics", fontsize=11, fontweight="bold")
+        ax.set_title("Q-Value & Differential Statistics", fontsize=11, fontweight="bold")
         ax.set_xlabel("Update Step", fontsize=9)
         ax.set_ylabel("Q-Value", fontsize=9)
         ax.tick_params(labelsize=8)
-        self._safe_legend(ax, fontsize=7, loc="best")
+        self._safe_legend(ax, fontsize=6, loc="best")
         ax.grid(True, alpha=0.3)
 
     def _plot_epsilon(self, row, col, eps_hist):
