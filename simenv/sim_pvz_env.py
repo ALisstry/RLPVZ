@@ -14,14 +14,14 @@ ZOMBIE_HP_NORM = 3000.0
 CARD_SPECS = (
     ("sunflower", "Sunflower", 1, Sunflower),
     ("peashooter", "Peashooter", 0, Peashooter),
-    ("snow-pea", "Snow Pea", 5, SnowPea),
-    ("repeater", "Repeater", 7, Repeater),
+    ("potatomine", "Potato Mine", 4, Potatomine),
     ("wall-nut", "Wall-nut", 3, Wallnut),
+    ("repeater", "Repeater", 7, Repeater),
     ("squash", "Squash", 17, Squash),
     ("cherry-bomb", "Cherry Bomb", 2, CherryBomb),
-    ("spikeweed", "Spikeweed", 21, Spikeweed),
-    ("kernel-pult", "Kernel-pult", 34, KernelPult),
+    ("snow-pea", "Snow Pea", 5, SnowPea),
     ("melon-pult", "Melon-pult", 39, MelonPult),
+    ("spikeweed", "Spikeweed", 21, Spikeweed),
 )
 
 
