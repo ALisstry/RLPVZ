@@ -247,7 +247,6 @@ class LivePlotter:
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(xlabel, fontsize=9)
         ax.set_ylabel(ylabel, fontsize=9)
-        ax.set_xlim(0, len(data))
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3)
 
@@ -293,10 +292,6 @@ class LivePlotter:
         ax.tick_params(labelsize=8)
         self._safe_legend(ax, fontsize=6, loc="best")
         ax.grid(True, alpha=0.3)
-        n_q = max(len(q_mean) if q_mean is not None else 0,
-                   len(q_max) if q_max is not None else 0)
-        if n_q > 0:
-            ax.set_xlim(0, n_q)
 
     def _plot_epsilon(self, row, col, eps_hist):
         ax = self.axes[row, col]
@@ -312,8 +307,6 @@ class LivePlotter:
         ax.set_ylabel("Epsilon", fontsize=9)
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3)
-        if eps_hist is not None and len(eps_hist) > 0:
-            ax.set_xlim(0, len(eps_hist))
 
     def _plot_rolling_mean(self, row, col, data, title, xlabel, ylabel, color):
         ax = self.axes[row, col]
@@ -330,8 +323,6 @@ class LivePlotter:
         ax.set_ylabel(ylabel, fontsize=9)
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3)
-        if data is not None and len(data) > 0:
-            ax.set_xlim(0, len(data))
 
     def _plot_log_loss(self, row, col, loss):
         ax = self.axes[row, col]
@@ -349,8 +340,6 @@ class LivePlotter:
         ax.set_ylabel("Loss", fontsize=9)
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3, which="both")
-        if loss is not None and len(loss) > 0:
-            ax.set_xlim(0, len(loss))
 
     def _plot_scatter(self, row, col, xdata, ydata, title, xlabel, ylabel):
         ax = self.axes[row, col]
