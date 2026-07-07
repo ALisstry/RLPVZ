@@ -3,7 +3,7 @@ from ..projectile.snowpea import SnowPeaProjectile
 from ... import config
 
 SNOW_PEA_COST = 175
-SNOW_PEA_COOLDOWN = 5
+SNOW_PEA_COOLDOWN = 7.5
 SNOW_PEA_MAX_HP = 300
 SNOW_PEA_ATTACK = 20
 SNOW_PEA_ATTACK_COOLDOWN = 1.41
