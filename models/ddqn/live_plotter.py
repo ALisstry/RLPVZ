@@ -53,7 +53,8 @@ class LivePlotter:
         self.update_freq = update_freq
         self.max_episodes = max_episodes
         self._last_update = -1
-        self._epsilon = 1.0  # updated from outside
+        self._has_data = False  # True after at least one successful update
+        self._epsilon = 1.0    # updated from outside
         self._setup_figure()
 
     # ── figure setup ──────────────────────────────────────────────────────
@@ -75,11 +76,12 @@ class LivePlotter:
         """
         if episode - self._last_update < self.update_freq:
             return
-        self._last_update = episode
 
         d = self._extract_data(stats)
         if d is None:
             return
+
+        self._last_update = episode
 
         # ── title bar ──────────────────────────────────────────────────
         self.fig.suptitle(
@@ -142,12 +144,19 @@ class LivePlotter:
         os.makedirs(os.path.dirname(self.save_path) or ".", exist_ok=True)
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         self.fig.savefig(self.save_path, dpi=120, bbox_inches="tight")
+        self._has_data = True
         print(f"[dashboard] saved → {self.save_path}  (ep {episode})", flush=True)
 
     def keep_open(self):
-        """Save final snapshot and close the figure."""
-        self.fig.savefig(self.save_path, dpi=120, bbox_inches="tight")
-        print(f"[dashboard] final → {self.save_path}", flush=True)
+        """Save final snapshot and close the figure.
+
+        Only overwrites the save_path if at least one successful update
+        has occurred, preventing an empty figure from clobbering a
+        previous run's dashboard.
+        """
+        if self._has_data:
+            self.fig.savefig(self.save_path, dpi=120, bbox_inches="tight")
+            print(f"[dashboard] final → {self.save_path}", flush=True)
         plt.close(self.fig)
 
     # ── data extraction ──────────────────────────────────────────────────
@@ -238,7 +247,7 @@ class LivePlotter:
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(xlabel, fontsize=9)
         ax.set_ylabel(ylabel, fontsize=9)
-        ax.set_xlim(0, max(len(data), self.max_episodes))
+        ax.set_xlim(0, len(data))
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3)
 
@@ -284,6 +293,10 @@ class LivePlotter:
         ax.tick_params(labelsize=8)
         self._safe_legend(ax, fontsize=6, loc="best")
         ax.grid(True, alpha=0.3)
+        n_q = max(len(q_mean) if q_mean is not None else 0,
+                   len(q_max) if q_max is not None else 0)
+        if n_q > 0:
+            ax.set_xlim(0, n_q)
 
     def _plot_epsilon(self, row, col, eps_hist):
         ax = self.axes[row, col]
@@ -299,6 +312,8 @@ class LivePlotter:
         ax.set_ylabel("Epsilon", fontsize=9)
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3)
+        if eps_hist is not None and len(eps_hist) > 0:
+            ax.set_xlim(0, len(eps_hist))
 
     def _plot_rolling_mean(self, row, col, data, title, xlabel, ylabel, color):
         ax = self.axes[row, col]
@@ -315,7 +330,8 @@ class LivePlotter:
         ax.set_ylabel(ylabel, fontsize=9)
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, self.max_episodes)
+        if data is not None and len(data) > 0:
+            ax.set_xlim(0, len(data))
 
     def _plot_log_loss(self, row, col, loss):
         ax = self.axes[row, col]
@@ -333,6 +349,8 @@ class LivePlotter:
         ax.set_ylabel("Loss", fontsize=9)
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3, which="both")
+        if loss is not None and len(loss) > 0:
+            ax.set_xlim(0, len(loss))
 
     def _plot_scatter(self, row, col, xdata, ydata, title, xlabel, ylabel):
         ax = self.axes[row, col]

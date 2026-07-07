@@ -62,6 +62,7 @@ class DDQNTrainingStats:
         self.training_entropy = []
         self.training_advantage = []
         self.training_grad_norm = []
+        self.training_epsilons = []     # per-episode exploration rate
         self.training_q_wait = []       # Q(s, wait) — baseline "do nothing" value
         self.training_delta_mean = []   # mean Δ(s,a) = mean(Q(s,a) - Q(s,wait))
         self.training_delta_max = []    # max Δ(s,a) — best action vs wait
@@ -141,12 +142,14 @@ class DDQNTrainingStats:
         self.training_rewards.append(reward)
         self.training_iterations.append(iterations)
         self.training_successes.append(1.0 if success else 0.0)
+        self.training_epsilons.append(float(epsilon))
 
         # Cap per-episode lists
         if len(self.training_rewards) > self._max_episode_history:
             self.training_rewards = self.training_rewards[-self._max_episode_history:]
             self.training_iterations = self.training_iterations[-self._max_episode_history:]
             self.training_successes = self.training_successes[-self._max_episode_history:]
+            self.training_epsilons = self.training_epsilons[-self._max_episode_history:]
 
         recent_rewards = self.training_rewards[-self.window :]
         recent_iterations = self.training_iterations[-self.window :]
