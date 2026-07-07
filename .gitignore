@@ -40,3 +40,6 @@ paper/
 
 # Benchmark
 benchmark_output/
+
+scripts/
+training_config_test.yaml
