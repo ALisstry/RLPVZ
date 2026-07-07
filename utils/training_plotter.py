@@ -208,17 +208,6 @@ class TrainingCurvePlotter:
                 label="eval reward",
             )
 
-        # 原始 episode reward 半透明背景
-        if episode_rewards:
-            ax.plot(
-                np.arange(1, len(episode_rewards) + 1),
-                episode_rewards,
-                color="#9aa0a6",
-                alpha=0.18,
-                linewidth=0.7,
-                label="episode reward",
-            )
-
         ax.set_xlabel("Episode")
         ax.set_ylabel("Reward")
         ax.grid(True, alpha=0.3)
