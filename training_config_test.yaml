@@ -167,7 +167,7 @@ training:
     ddqn_update_freq: 32
     ddqn_sync_freq: 2000        # same as baseline
     ddqn_checkpoint_freq: 500
-    ddqn_plot_freq: 50
+    ddqn_plot_freq: 10
     ddqn_plot_path: null
     ddqn_save_path: null
     ddqn_load_path: null
