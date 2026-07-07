@@ -43,12 +43,12 @@ class EpsilonSchedule:
 
 
 def train_sim(
-    max_episodes=100000,
+    max_episodes=200000,
     buffer_size=100000,
     burn_in=10000,
     batch_size=512,
     gamma=0.99,
-    lr=3e-4,
+    lr=1e-4,
     network_update_freq=64,
     network_sync_freq=5000,
     save_path=None,
