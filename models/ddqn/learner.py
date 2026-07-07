@@ -25,8 +25,15 @@ class DDQNLearner:
         self.target_network.load_state_dict(self.network.state_dict())
         return self.state_dict_cpu()
 
-    def calculate_loss(self, batch, is_weights=None):
+    def calculate_loss(self, batch, is_weights=None, target_shift=0.0):
         """Double-DQN loss, optionally with PER importance-sampling weights.
+
+        Args:
+            batch: tuple of (states, actions, rewards, dones, next_states, masks, next_masks)
+            is_weights: optional PER importance-sampling weights, shape (B, 1)
+            target_shift: optional scalar added to expected_qvals for gradient-flow check.
+                Default 0.0 (no shift).  Set to e.g. 1.0 to verify the network can chase
+                a moving target.
 
         Returns:
             (loss, td_errors, q_stats) — *loss* is scalar, *td_errors* is
@@ -96,6 +103,10 @@ class DDQNLearner:
         qvals_next[dones_t] = 0
         expected_qvals = self.gamma * qvals_next + rewards_t
 
+        # Optional target shift for gradient-flow diagnostic
+        if target_shift != 0.0:
+            expected_qvals = expected_qvals + target_shift
+
         # Element-wise TD errors for PER priority updates
         td_errors = (expected_qvals - qvals).detach()
 
@@ -110,6 +121,145 @@ class DDQNLearner:
             loss = elementwise_loss.mean()
 
         return loss, td_errors.cpu().numpy(), q_stats
+
+    def overfit_test(self, batch, is_weights=None, n_iterations: int = 100,
+                     log_prefix: str = "[Overfit]"):
+        """单步过拟合诊断：对同一批数据反复训练，观察 loss 是否下降。
+
+        用于验证网络 + 损失函数是否正常：
+          - loss 下降到接近 0 → 算法实现正确，问题在数据分布/探索
+          - loss 不下降或震荡 → 网络架构或损失计算存在 bug
+
+        Phase 2 (gradient-flow check):
+          收敛后将 target 偏移 +1.0，验证 Q 值能否追到新目标。
+          能追上 → 计算图活着，梯度正常流动。
+          追不上 → 权重被冻住或梯度断裂。
+
+        Returns:
+            losses: list of float, 每次迭代的 loss 值（仅 phase 1）
+        """
+        import time
+
+        # =================================================================
+        # Phase 1: 标准过拟合 — loss → 0
+        # =================================================================
+        losses = []
+        start = time.perf_counter()
+        for i in range(n_iterations):
+            self.network.optimizer.zero_grad(set_to_none=True)
+            loss, td_errors, q_stats = self.calculate_loss(batch, is_weights)
+            loss.backward()
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                self.network.parameters(), max_norm=10.0,
+            )
+            self.network.optimizer.step()
+            loss_val = float(loss.detach().cpu().item())
+            losses.append(loss_val)
+            if i == 0 or i == n_iterations - 1 or (i + 1) % 20 == 0:
+                print(
+                    f"{log_prefix} iter {i + 1:3d}/{n_iterations} | "
+                    f"loss={loss_val:.6f} | "
+                    f"mean_q={q_stats['mean_q']:.4f} | "
+                    f"max_q={q_stats['max_q']:.4f} | "
+                    f"td_err_mean={float(td_errors.mean()):.6f} | "
+                    f"grad_norm={float(total_norm):.4f}",
+                    flush=True,
+                )
+        elapsed = time.perf_counter() - start
+        loss_start = losses[0]
+        loss_end = losses[-1]
+        loss_min = min(losses)
+        converged = loss_end < loss_start * 0.1 or loss_end < 0.01
+        verdict = "CONVERGED OK" if converged else "FAILED TO CONVERGE - check network/loss!"
+        print(
+            f"{log_prefix} done | "
+            f"loss: {loss_start:.6f} -> {loss_end:.6f} (min={loss_min:.6f}) | "
+            f"{verdict} | "
+            f"elapsed={elapsed:.2f}s",
+            flush=True,
+        )
+
+        # =================================================================
+        # Phase 2: 梯度流验证 — 偏移 target 看网络能否追上
+        #
+        # 关键：只检查被采取动作的 Q(s,a)，因为 loss = MSE(Q(s,a), target)。
+        # mean_q 包含所有 451 个动作，不受 loss 直接约束。
+        # =================================================================
+        TARGET_SHIFT = 1.0
+        N_SHIFT_ITERS = 30
+
+        states, actions, _, _, _, _, _ = [item for item in batch]
+        action_idx = actions[0] if isinstance(actions, (list, tuple)) else int(actions)
+
+        # 保存收敛后该动作的 Q 值
+        with torch.no_grad():
+            all_q = self.network.get_qvals(states)
+            if all_q.dim() == 1:
+                q_before_action = float(all_q[action_idx].cpu().item())
+            else:
+                q_before_action = float(all_q[0, action_idx].cpu().item())
+
+        print(
+            f"\n{log_prefix} [GradFlow] shifting target by +{TARGET_SHIFT:.1f}, "
+            f"Q(s, a={action_idx}) before = {q_before_action:.4f}",
+            flush=True,
+        )
+
+        shift_losses = []
+        for i in range(N_SHIFT_ITERS):
+            self.network.optimizer.zero_grad(set_to_none=True)
+            loss, td_errors, q_stats = self.calculate_loss(
+                batch, is_weights, target_shift=TARGET_SHIFT,
+            )
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.network.parameters(), max_norm=10.0,
+            )
+            self.network.optimizer.step()
+            loss_val = float(loss.detach().cpu().item())
+            shift_losses.append(loss_val)
+            if i == 0 or i == N_SHIFT_ITERS - 1 or (i + 1) % 10 == 0:
+                # Show Q(s,a) where 'a' is the taken action
+                with torch.no_grad():
+                    all_q = self.network.get_qvals(states)
+                    if all_q.dim() == 1:
+                        q_action = float(all_q[action_idx].cpu().item())
+                    else:
+                        q_action = float(all_q[0, action_idx].cpu().item())
+                print(
+                    f"{log_prefix} [GradFlow] iter {i + 1:3d}/{N_SHIFT_ITERS} | "
+                    f"loss={loss_val:.6f} | "
+                    f"Q(s,a={action_idx})={q_action:.4f} | "
+                    f"td_err_mean={float(td_errors.mean()):.6f}",
+                    flush=True,
+                )
+
+        with torch.no_grad():
+            all_q = self.network.get_qvals(states)
+            if all_q.dim() == 1:
+                q_after_action = float(all_q[action_idx].cpu().item())
+            else:
+                q_after_action = float(all_q[0, action_idx].cpu().item())
+        q_delta = q_after_action - q_before_action
+
+        shift_start = shift_losses[0]
+        shift_end = shift_losses[-1]
+        graph_alive = (
+            shift_end < shift_start * 0.5
+            and abs(q_delta - TARGET_SHIFT) < 0.3
+        )
+        gv = "GRAPH ALIVE - gradients flowing correctly" if graph_alive else \
+            "GRAPH DEAD? - Q(s,a) did not chase the shifted target, check gradients!"
+        print(
+            f"{log_prefix} [GradFlow] done | "
+            f"loss: {shift_start:.6f} -> {shift_end:.6f} | "
+            f"Q(s,a={action_idx}): {q_before_action:.4f} -> {q_after_action:.4f} "
+            f"(delta={q_delta:+.4f}, target=+{TARGET_SHIFT:.1f}) | "
+            f"{gv}",
+            flush=True,
+        )
+
+        return losses
 
     def update(self, replay_buffer, beta: float = 0.4):
         """Single gradient step.  Returns ``(loss, tree_indices, td_errors, q_stats)``

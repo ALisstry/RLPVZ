@@ -143,6 +143,7 @@ class AsyncDDQNTrainer:
             1, int(getattr(args, "ddqn_plot_freq", 20))
         )
         self.best_eval_checkpoint = None
+        self._overfit_test_done = False   # 单步过拟合诊断只跑一次
 
         # ── Live training dashboard ──
         dashboard_path = (
@@ -220,6 +221,12 @@ class AsyncDDQNTrainer:
 
                 if self.buffer.burn_in_capacity() < 1:
                     continue
+
+                # ── 单步过拟合诊断（burn-in 完成后只跑一次，默认关闭）──
+                if not self._overfit_test_done:
+                    self._overfit_test_done = True
+                    if getattr(self.args, "ddqn_overfit_test", False):
+                        self._run_overfit_diagnostic()
 
                 if self.transition_count % network_update_frequency == 0:
                     # PER beta: linear anneal from beta_start → 1.0
@@ -388,6 +395,74 @@ class AsyncDDQNTrainer:
             ):
                 self._run_worker_eval(worker_pool)
                 return  # 重新进入主循环，清空队列后恢复训练
+
+    def _run_overfit_diagnostic(self):
+        """单步过拟合诊断：取 buffer 中 1 条 transition，反复训练 100 次。
+
+        验证目标：
+          - loss 下降至接近 0 → 网络 + 损失函数实现正确
+          - loss 不降 → 网络架构、梯度流或损失计算存在 bug
+        """
+        print("\n" + "=" * 60, flush=True)
+        print("  单步过拟合诊断 (Single-Transition Overfit Test)", flush=True)
+        print("=" * 60, flush=True)
+
+        # 保存当前网络权重，测试完恢复
+        state_backup = {
+            k: v.detach().cpu().clone()
+            for k, v in self.network.state_dict().items()
+        }
+
+        # 取 1 条 transition（beta=1.0 关闭 IS 修正）
+        batch, tree_indices, is_weights = self.buffer.sample_batch(
+            batch_size=1, beta=1.0,
+        )
+        states, actions, rewards, dones, next_states, masks, next_masks = [
+            item for item in batch
+        ]
+        action = actions[0]
+        reward = rewards[0]
+        done = dones[0]
+        print(
+            f"  采样 transition: action={action}, reward={reward:.2f}, "
+            f"done={done}",
+            flush=True,
+        )
+
+        # 诊断 1: 检查 state / next_state 是否完全相同
+        s0 = np.asarray(states[0])
+        s1 = np.asarray(next_states[0])
+        state_diff = np.abs(s0 - s1).sum()
+        state_same = state_diff < 1e-6
+        print(
+            f"  |state - next_state|_1 = {state_diff:.2f}"
+            f"{'  (IDENTICAL!)' if state_same else ''}",
+            flush=True,
+        )
+
+        # 诊断 2: 过拟合训练
+        losses = self.learner.overfit_test(
+            batch, is_weights=None, n_iterations=100,
+            log_prefix="  [Overfit]",
+        )
+
+        # 恢复权重
+        self.learner.network.load_state_dict(state_backup)
+        # 同步 target network 也恢复
+        self.learner.target_network.load_state_dict(state_backup)
+
+        # 诊断 3: 检查 target vs online Q 值差异
+        with torch.no_grad():
+            online_q = self.learner.network.get_qvals(states)
+            target_q = self.learner.target_network.get_qvals(next_states)
+            online_max = float(online_q.max(dim=-1).values.cpu().item())
+            target_max = float(target_q.max(dim=-1).values.cpu().item())
+        print(
+            f"  初始 online max Q = {online_max:.6f} | "
+            f"target max Q = {target_max:.6f}",
+            flush=True,
+        )
+        print("=" * 60 + "\n", flush=True)
 
     def _emit_training_metrics(self, force=False):
         ep = self.stats.episode_count
