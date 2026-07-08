@@ -15,6 +15,7 @@ from training.evaluation import (
 
 from .adapter import typed_onehot_state_dim
 from .ddqn import QNetwork, DuelingQNetwork, DifferentialQNetwork
+from .factored_network import FactoredQNetwork
 from .train_entry import _parse_hidden_sizes
 from .worker_pool import build_ddqn_env
 
@@ -276,9 +277,12 @@ def _build_network(args, env):
             use_factored=use_factored,
         )
     else:
+        use_factored = getattr(args, "use_factored", False)
         use_differential = getattr(args, "use_differential", False)
         use_dueling = getattr(args, "use_dueling", False)
-        if use_differential:
+        if use_factored:
+            EvalNet = FactoredQNetwork
+        elif use_differential:
             EvalNet = DifferentialQNetwork
         elif use_dueling:
             EvalNet = DuelingQNetwork

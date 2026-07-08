@@ -5,6 +5,7 @@ import numpy as np
 
 from .threshold import Threshold
 from .ddqn import QNetwork, DuelingQNetwork, DifferentialQNetwork
+from .factored_network import FactoredQNetwork
 from training.logging import setup_worker_logging
 from training.worker_pool import AsyncWorkerPool
 
@@ -206,9 +207,12 @@ def ddqn_worker_main(
                 use_factored=use_factored,
             )
         else:
+            use_factored = getattr(args, "use_factored", False)
             use_differential = getattr(args, "use_differential", False)
             use_dueling = getattr(args, "use_dueling", False)
-            if use_differential:
+            if use_factored:
+                WorkerNet = FactoredQNetwork
+            elif use_differential:
                 WorkerNet = DifferentialQNetwork
             elif use_dueling:
                 WorkerNet = DuelingQNetwork

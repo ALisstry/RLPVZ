@@ -264,20 +264,20 @@ class LivePlotter:
             ax.plot(sx, sy, color="tab:orange", linewidth=1.8,
                     label=f"Max Q (MA{self.window})")
             has_data = True
-        # ── Differential Q: Q_wait (baseline "do nothing" value) ──
+        # ── Q(wait): baseline "do nothing" value (always shown) ──
         if q_wait is not None and len(q_wait) > 0:
             sx, sy = _rolling_mean(q_wait, self.window)
             ax.plot(sx, sy, color="tab:green", linewidth=1.5, linestyle="--",
                     label=f"Q(wait) (MA{self.window})")
             has_data = True
-        # ── Delta mean: average advantage over waiting ──
+        # ── Δ mean: average advantage over waiting ──
         if delta_mean is not None and len(delta_mean) > 0:
             sx, sy = _rolling_mean(delta_mean, self.window)
             ax.plot(sx, sy, color="tab:red", linewidth=1.5, linestyle=":",
                     label=f"Δ mean (MA{self.window})")
             ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
             has_data = True
-        # ── Delta max: best action advantage over waiting ──
+        # ── Δ max: best action advantage over waiting ──
         if delta_max is not None and len(delta_max) > 0:
             sx, sy = _rolling_mean(delta_max, self.window)
             ax.plot(sx, sy, color="tab:purple", linewidth=1.2, linestyle="-.",
@@ -286,6 +286,16 @@ class LivePlotter:
         if not has_data:
             ax.text(0.5, 0.5, "No data yet", transform=ax.transAxes,
                     ha="center", va="center", fontsize=10, color="gray")
+        # ── Diagnostic gap annotation ──
+        if all(v is not None and len(v) > 0 for v in (q_mean, q_wait)):
+            latest_mean = q_mean[-1]
+            latest_wait = q_wait[-1]
+            gap = latest_mean - latest_wait
+            ax.text(0.98, 0.02,
+                    f"gap(MeanQ−Qwait)={gap:+.4f}",
+                    transform=ax.transAxes, ha="right", va="bottom",
+                    fontsize=7, color="gray",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
         ax.set_title("Q-Value & Differential Statistics", fontsize=11, fontweight="bold")
         ax.set_xlabel("Update Step", fontsize=9)
         ax.set_ylabel("Q-Value", fontsize=9)

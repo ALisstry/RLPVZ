@@ -1,0 +1,164 @@
+# PVZ AI Factored Action-Space Training Configuration
+# Dense reward: zombie HP reduction per step (zombie_damage).
+# 3-Factor architecture: Q(card,row,col) = q_card + q_row + q_col
+#
+# Decomposes the 451-action space into independent factors:
+#   card (10) × row (5) × col (9) + wait (1) → 25 output dims
+#   Full 451 Q-values enumerated explicitly at query time.
+#
+# Usage:
+#   .\.venv\Scripts\python.exe train.py --training_config training_config_factored.yaml
+
+# =============================================================================
+# Game Settings — Survival: Day (Hard)
+# =============================================================================
+game:
+  game_mode_id: 6                # GAMEMODE_SURVIVAL_HARD_DAY
+  rows: 5
+  cols: 9
+  initial_sun: 50
+
+# =============================================================================
+# Card Loadout — paper Table 4
+# =============================================================================
+cards:
+  slot_count: 10
+
+  plants:
+    - slot: 0
+      id: 1
+      name: "Sunflower"
+      cost: 50
+    - slot: 1
+      id: 0
+      name: "Peashooter"
+      cost: 100
+    - slot: 2
+      id: 4
+      name: "Potato Mine"
+      cost: 25
+    - slot: 3
+      id: 3
+      name: "Wall-nut"
+      cost: 50
+    - slot: 4
+      id: 7
+      name: "Repeater"
+      cost: 200
+    - slot: 5
+      id: 17
+      name: "Squash"
+      cost: 50
+    - slot: 6
+      id: 2
+      name: "Cherry Bomb"
+      cost: 150
+    - slot: 7
+      id: 5
+      name: "Snow Pea"
+      cost: 175
+    - slot: 8
+      id: 39
+      name: "Melon-pult"
+      cost: 300
+    - slot: 9
+      id: 21
+      name: "Spikeweed"
+      cost: 100
+
+# =============================================================================
+# Action Space
+# =============================================================================
+action_space:
+  size: 451
+  structure:
+    plant_actions: 450          # 10 cards × 45 cells
+    shovel_actions: 0
+    wait_action: 1
+
+# =============================================================================
+# Observation Space — Paper-format 596-dim flat vector
+# =============================================================================
+observation_space:
+  grid:
+    shape: [5, 9, 13]
+  global:
+    total_dim: 61
+  card_attributes:
+    shape: [10, 7]
+
+# =============================================================================
+# Reward — zombie_damage only
+# =============================================================================
+rewards:
+  reward_scale: 1
+  plant_lost_sun_cost_scale: 0.0
+  invalid_action: 0.0
+  wait_with_sun: 0.0
+  game_win: 0.0
+  game_lose: 0.0
+
+# =============================================================================
+# Training Configuration — Factored (3-factor) variant
+#
+# Architecture:
+#   596 → hidden_sizes trunk → ─┬─ head_card → 10
+#                               ├─ head_row  →  5
+#                               ├─ head_col  →  9
+#                               └─ head_wait →  1
+#                                      Total: 25 dims
+#
+#   Q(card,row,col) = q_card + q_row + q_col   [450 combos enumerated]
+#   Q(wait) = q_wait
+#
+# Key difference from baseline:
+#   use_factored: true   ←  3-factor decomposition, 25 output dims vs 451
+# =============================================================================
+training:
+  args:
+    algo: "ddqn"
+    port: 12345
+    num_envs: 1
+    base_port: 12345
+    ports: ""
+    pids: ""
+    auto_start: true
+    launch_toolkit: false
+    game_path: "gameobj/PlantsVsZombies.exe"
+    wait_time: 3.0
+    speed: 10.0
+    frameskip: 49
+    auto_resume: false
+    env_console_log_level: 0
+    file_log_level: 1
+    execution: "async_worker_pool"
+    curriculum: "none"
+
+  ddqn:
+    ddqn_episodes: 10000
+    ddqn_gamma: 0.99
+    ddqn_batch_size: 512
+    ddqn_buffer_size: 100000
+    ddqn_burn_in: 10000
+    ddqn_lr: 0.0001
+    ddqn_update_freq: 32
+    ddqn_sync_freq: 2000
+    ddqn_checkpoint_freq: 500
+    ddqn_plot_freq: 50
+    ddqn_plot_path: null
+    ddqn_save_path: null
+    ddqn_load_path: null
+
+    # 3-factor action-space decomposition
+    ddqn_hidden_sizes: [2048, 2048]
+    use_factored: true              # Q(card,row,col) = q_card + q_row + q_col
+
+  eval:
+    enabled: true
+    freq_episodes: 1000
+    episodes: 50
+    deterministic: true
+    save_episode_details: true
+
+  env:
+    max_steps: 10000
