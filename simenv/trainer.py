@@ -2,8 +2,11 @@
 
 import gc
 import csv
+import json
 import os
 import signal
+import shutil
+import subprocess
 from datetime import datetime
 import numpy as np
 import torch
@@ -120,6 +123,22 @@ def train_sim(
             "max_frames": config.MAX_FRAMES,
             "plants": list(env.plant_deck.keys()),
         },
+    )
+    _save_run_metadata(
+        output_dir,
+        network=network,
+        env=env,
+        device=device,
+        max_episodes=max_episodes,
+        buffer_size=buffer_size,
+        burn_in=burn_in,
+        batch_size=batch_size,
+        gamma=gamma,
+        lr=lr,
+        network_update_freq=network_update_freq,
+        network_sync_freq=network_sync_freq,
+        eval_config=eval_config,
+        curriculum=curriculum,
     )
 
     training_rewards = []
@@ -369,6 +388,146 @@ def _print_config(**cfg):
     print(f"  {'Max frames:':24s} {ec['max_frames']} ({ec['max_frames'] // ec['fps']}s game time)")
     print(f"  {'Plant deck:':24s} {', '.join(ec['plants'])}")
     print(f"{sep}\n")
+
+
+def _save_run_metadata(
+    output_dir,
+    *,
+    network,
+    env,
+    device,
+    max_episodes,
+    buffer_size,
+    burn_in,
+    batch_size,
+    gamma,
+    lr,
+    network_update_freq,
+    network_sync_freq,
+    eval_config,
+    curriculum,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    _copy_if_exists(
+        os.path.join(project_root, "simenv", "config.py"),
+        os.path.join(output_dir, "simenv_config.py"),
+    )
+    _copy_if_exists(
+        os.path.join(project_root, "simenv", "consts.py"),
+        os.path.join(output_dir, "simenv_consts.py"),
+    )
+
+    hidden_sizes = _network_hidden_sizes(network)
+    git_info = _git_info(project_root)
+    diff_text = git_info.pop("_diff_text", "")
+    metadata = {
+        "algo": "ddqn",
+        "env_kind": "sim",
+        "device": device,
+        "network": {
+            "class": network.__class__.__name__,
+            "input_dim": int(network.n_inputs),
+            "output_dim": int(network.n_outputs),
+            "hidden_sizes": hidden_sizes,
+            "params": int(sum(p.numel() for p in network.parameters())),
+        },
+        "training": {
+            "max_episodes": int(max_episodes),
+            "buffer_size": int(buffer_size),
+            "burn_in": int(burn_in),
+            "batch_size": int(batch_size),
+            "gamma": float(gamma),
+            "lr": float(lr),
+            "network_update_freq": int(network_update_freq),
+            "network_sync_freq": int(network_sync_freq),
+        },
+        "eval": {
+            "enabled": bool(eval_config.enabled),
+            "freq_episodes": int(eval_config.freq_episodes),
+            "episodes": int(eval_config.episodes),
+            "deterministic": bool(eval_config.deterministic),
+            "save_episode_details": bool(eval_config.save_episode_details),
+        },
+        "env": {
+            "rows": int(env.rows),
+            "cols": int(env.cols),
+            "state_dim": int(env.state_dim),
+            "action_dim": int(env.action_space.n),
+            "card_order": list(env.card_plant_ids),
+            "plant_names": list(env._plant_names),
+        },
+        "curriculum": _jsonable(CURRICULUM),
+        "current_stage": getattr(curriculum, "current_stage_name", None),
+        "git": git_info,
+        "snapshots": {
+            "config": "simenv_config.py",
+            "consts": "simenv_consts.py",
+            "diff": "git_diff.patch" if git_info.get("dirty") else None,
+        },
+    }
+    with open(os.path.join(output_dir, "run_metadata.json"), "w", encoding="utf-8") as file:
+        json.dump(metadata, file, ensure_ascii=False, indent=2)
+
+    if diff_text:
+        with open(os.path.join(output_dir, "git_diff.patch"), "w", encoding="utf-8") as file:
+            file.write(diff_text)
+
+
+def _copy_if_exists(src, dst):
+    if os.path.exists(src):
+        shutil.copyfile(src, dst)
+
+
+def _network_hidden_sizes(network):
+    linears = [
+        module for module in network.network
+        if isinstance(module, torch.nn.Linear)
+    ]
+    return [int(layer.out_features) for layer in linears[:-1]]
+
+
+def _git_info(project_root):
+    commit = _run_git(project_root, "rev-parse", "HEAD").strip()
+    status = _run_git(project_root, "status", "--porcelain")
+    diff_text = ""
+    if status.strip():
+        diff_text = _run_git(project_root, "diff", "HEAD", "--")
+    return {
+        "commit": commit or None,
+        "dirty": bool(status.strip()),
+        "status": status.splitlines(),
+        "_diff_text": diff_text,
+    }
+
+
+def _run_git(project_root, *args):
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=project_root,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def _jsonable(value):
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def _burn_in_stage(env, buffer, *, step_count, stage_name, stop_requested):
