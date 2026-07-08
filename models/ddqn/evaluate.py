@@ -112,6 +112,32 @@ def _ddqn_parallel_worker(
             _close_envs(envs)
 
 
+def _detect_architecture_from_state_dict(state_dict: dict) -> str:
+    """Detect network architecture from checkpoint keys.
+
+    Returns one of ``'cnn'``, ``'differential'``, ``'dueling'``,
+    ``'factored'``, or ``'standard'``.
+    """
+    keys = list(state_dict.keys())
+    if any(k.startswith('branch_3x3.') for k in keys):
+        return 'cnn'
+    if any(k.startswith('wait_head.') for k in keys):
+        return 'differential'
+    if any(k.startswith('head_row.') for k in keys) and any(k.startswith('head_col.') for k in keys):
+        return 'factored'
+    if any(k.startswith('value_head.') for k in keys):
+        return 'dueling'
+    return 'standard'
+
+
+def _apply_detected_architecture(args, arch: str):
+    """Set architecture flags on *args* to force the correct network class."""
+    args.use_cnn = (arch == 'cnn')
+    args.use_factored = (arch == 'factored')
+    args.use_differential = (arch == 'differential')
+    args.use_dueling = (arch == 'dueling')
+
+
 def evaluate_ddqn(
     args,
     model_path,
@@ -126,6 +152,13 @@ def evaluate_ddqn(
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"DDQN model not found: {model_path}")
 
+    # Auto-detect architecture from checkpoint so the correct network is built
+    # even if the user omits --training_config or uses a mismatched one.
+    state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+    arch = _detect_architecture_from_state_dict(state_dict)
+    _apply_detected_architecture(args, arch)
+    print(f"[Eval][DDQN] Detected architecture: {arch}", flush=True)
+
     num_workers = max(1, min(num_workers, len(instances)))
     eval_id = new_eval_id("real_ddqn")
     start_time = time_eval_run()
@@ -138,7 +171,6 @@ def evaluate_ddqn(
         envs = _build_eval_envs(args, instances[:1], env_spec, scenario_spec)
         try:
             network = _build_network(args, envs[0])
-            state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
             network.load_state_dict(state_dict)
             network.eval()
             start_idx, count = episode_splits[0]
@@ -153,14 +185,7 @@ def evaluate_ddqn(
         finally:
             _close_envs(envs)
     else:
-        # Pre-load state_dict once — read-only sharing across threads is safe
-        temp_envs = _build_eval_envs(args, instances[:1], env_spec, scenario_spec)
-        try:
-            temp_network = _build_network(args, temp_envs[0])
-            state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
-        finally:
-            _close_envs(temp_envs)
-
+        # state_dict already loaded & architecture detected above
         print(
             f"[Eval][DDQN] Dispatching {episodes} episodes "
             f"across {actual_workers} parallel workers"
@@ -224,6 +249,10 @@ def evaluate_ddqn_state_dict(
 ):
     if not instances:
         raise ValueError("DDQN eval requires at least one game instance")
+
+    # Auto-detect architecture from state dict keys
+    arch = _detect_architecture_from_state_dict(state_dict)
+    _apply_detected_architecture(args, arch)
 
     envs = []
     try:
