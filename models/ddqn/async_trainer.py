@@ -62,12 +62,10 @@ class AsyncDDQNTrainer:
         if context is not None and getattr(args, "auto_resume", True):
             snapshot = load_training_snapshot(context.run_paths.metrics_snapshot_path)
             metric_events = load_metric_events(context.run_paths.metrics_csv_path)
-        max_ep = max(1, int(getattr(args, "ddqn_episodes", 10000)))
         self.stats = DDQNTrainingStats.from_history(
             window=metric_window,
             snapshot=snapshot,
             events=metric_events,
-            max_episodes=max_ep,
         )
 
         self.transition_count = max(

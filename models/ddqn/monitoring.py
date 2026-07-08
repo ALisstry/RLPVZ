@@ -43,14 +43,8 @@ class EpisodeStats:
 
 
 class DDQNTrainingStats:
-    _MAX_LOSS_HISTORY = 20000
-    _MAX_EPISODE_HISTORY_DEFAULT = 10000
-
-    def __init__(self, window: int = 100, max_episodes: int = 0):
+    def __init__(self, window: int = 100):
         self.window = window
-        self._max_episode_history = (
-            max_episodes if max_episodes > 0 else self._max_episode_history_DEFAULT
-        )
         self.episode_count = 0
         self.training_rewards = []
         self.training_iterations = []
@@ -74,8 +68,8 @@ class DDQNTrainingStats:
         self.sync_eps = []
 
     @classmethod
-    def from_history(cls, window: int, snapshot=None, events=None, max_episodes: int = 0):
-        stats = cls(window=window, max_episodes=max_episodes)
+    def from_history(cls, window: int, snapshot=None, events=None):
+        stats = cls(window=window)
         events = events or []
 
         # Determine the trustworthy episode count from snapshot (saved atomically
@@ -144,13 +138,6 @@ class DDQNTrainingStats:
         self.training_successes.append(1.0 if success else 0.0)
         self.training_epsilons.append(float(epsilon))
 
-        # Cap per-episode lists
-        if len(self.training_rewards) > self._max_episode_history:
-            self.training_rewards = self.training_rewards[-self._max_episode_history:]
-            self.training_iterations = self.training_iterations[-self._max_episode_history:]
-            self.training_successes = self.training_successes[-self._max_episode_history:]
-            self.training_epsilons = self.training_epsilons[-self._max_episode_history:]
-
         recent_rewards = self.training_rewards[-self.window :]
         recent_iterations = self.training_iterations[-self.window :]
         recent_successes = self.training_successes[-self.window :]
@@ -159,11 +146,6 @@ class DDQNTrainingStats:
         mean_success_rate = sum(recent_successes) / len(recent_successes)
         self.mean_training_rewards.append(mean_reward)
         self.mean_training_iterations.append(mean_iterations)
-
-        # Cap mean lists
-        if len(self.mean_training_rewards) > self._max_episode_history:
-            self.mean_training_rewards = self.mean_training_rewards[-self._max_episode_history:]
-            self.mean_training_iterations = self.mean_training_iterations[-self._max_episode_history:]
 
         return EpisodeStats(
             episode=self.episode_count,
@@ -180,13 +162,9 @@ class DDQNTrainingStats:
 
     def record_loss(self, loss_value):
         self.training_loss.append(float(loss_value))
-        if len(self.training_loss) > self._MAX_LOSS_HISTORY:
-            self.training_loss = self.training_loss[-self._MAX_LOSS_HISTORY:]
 
     def record_td_error(self, mean_abs_td: float):
         self.training_td_errors.append(float(mean_abs_td))
-        if len(self.training_td_errors) > self._MAX_LOSS_HISTORY:
-            self.training_td_errors = self.training_td_errors[-self._MAX_LOSS_HISTORY:]
 
     def record_q_stats(self, mean_q: float, max_q: float, entropy: float,
                        advantage: float = 0.0, grad_norm: float = 0.0,
@@ -200,12 +178,6 @@ class DDQNTrainingStats:
         self.training_q_wait.append(float(q_wait))
         self.training_delta_mean.append(float(delta_mean))
         self.training_delta_max.append(float(delta_max))
-        for attr in ("training_mean_q", "training_max_q", "training_entropy",
-                     "training_advantage", "training_grad_norm",
-                     "training_q_wait", "training_delta_mean", "training_delta_max"):
-            values = getattr(self, attr)
-            if len(values) > self._MAX_LOSS_HISTORY:
-                setattr(self, attr, values[-self._MAX_LOSS_HISTORY:])
 
     def record_eval_result(self, episode: int, mean_reward: float, win_rate: float):
         self.eval_steps.append(episode)
@@ -230,6 +202,9 @@ class DDQNTrainingStats:
             entropy_values=list(self.training_entropy),
             advantage_values=list(self.training_advantage),
             grad_norm_values=list(self.training_grad_norm),
+            q_wait_values=list(self.training_q_wait),
+            delta_mean_values=list(self.training_delta_mean),
+            delta_max_values=list(self.training_delta_max),
             eval_steps=list(self.eval_steps),
             eval_rewards=list(self.eval_rewards),
             force=force,
