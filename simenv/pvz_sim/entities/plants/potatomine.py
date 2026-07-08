@@ -19,12 +19,12 @@ class Potatomine(Plant):
 
     def step(self, scene):
         if self.attack_cooldown <= 0:
+            triggered = False
             for zombie in scene.zombies:
                 if zombie.pos == self.pos and zombie.lane == self.lane:
-                    for z in scene.zombies:
-                        if z.pos == self.pos and z.lane == self.lane:
-                            z.hp = 0
-                    self.hp = 0
-                    break
+                    zombie.hp = 0
+                    triggered = True
+            if triggered:
+                self.hp = 0
         else:
             self.attack_cooldown -= 1

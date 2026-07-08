@@ -201,7 +201,7 @@ def train_sim(
             action = network.decide_action(s_0, mask, epsilon=epsilon)
             s_1, r, done, info = env.step(action)
             s_1 = transform_observation(s_1)
-            next_mask = np.array(env.mask_available_actions())
+            next_mask = info.get("mask", env.mask_available_actions())
             rewards += r
             buffer.append(s_0, action, r, done, s_1, mask, next_mask)
             s_0 = s_1.copy()
@@ -541,15 +541,15 @@ def _burn_in_stage(env, buffer, *, step_count, stage_name, stop_requested):
             action = env.wait_action
         else:
             action = np.random.choice(np.arange(env.action_space.n)[mask])
-        next_state, reward, done, _ = env.step(action)
+        next_state, reward, done, info = env.step(action)
         next_state = transform_observation(next_state)
-        next_mask = np.array(env.mask_available_actions())
+        next_mask = info.get("mask", env.mask_available_actions())
         buffer.append(state, action, reward, done, next_state, mask, next_mask)
         state = next_state.copy()
         if done:
             state = transform_observation(env.reset())
         step_count += 1
-    print(f"Burn-in done. Buffer: {len(buffer.replay_memory)}  "
+    print(f"Burn-in done. Buffer: {len(buffer)}  "
           f"(steps so far: {step_count})")
     return state, step_count, bool(stop_requested())
 

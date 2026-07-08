@@ -1,6 +1,6 @@
 """DDQN model, replay buffer, and loss for the simulation environment."""
 
-from collections import deque, namedtuple
+from collections import namedtuple
 
 import numpy as np
 import torch
@@ -23,20 +23,28 @@ class ReplayBuffer:
                 "next_mask",
             ],
         )
-        self.replay_memory = deque(maxlen=memory_size)
+        self.replay_memory = [None] * memory_size  # ring buffer — O(1) indexing
+        self._write_ptr = 0
+        self._size = 0
+
+    def __len__(self):
+        return self._size
 
     def sample_batch(self, batch_size=32):
-        samples = np.random.choice(len(self.replay_memory), batch_size, replace=False)
-        batch = zip(*[self.replay_memory[i] for i in samples])
-        return batch
+        n = min(self._size, self.memory_size)
+        samples = np.random.choice(n, batch_size, replace=False)
+        entries = [self.replay_memory[i] for i in samples]
+        return zip(*entries)
 
     def append(self, state, action, reward, done, next_state, mask, next_mask):
-        self.replay_memory.append(
-            self.Buffer(state, action, reward, done, next_state, mask, next_mask)
+        self.replay_memory[self._write_ptr] = self.Buffer(
+            state, action, reward, done, next_state, mask, next_mask,
         )
+        self._write_ptr = (self._write_ptr + 1) % self.memory_size
+        self._size = min(self._size + 1, self.memory_size)
 
     def burn_in_capacity(self):
-        return len(self.replay_memory) / self.burn_in
+        return self._size / max(1, self.burn_in)
 
 
 class DDQNNetwork(nn.Module):

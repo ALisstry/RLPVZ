@@ -84,10 +84,10 @@ class SimPVZEnv:
 
         self._scene = self._new_scene()
         self._steps = 0
-        self._last_mask = None
         self._collect_render = False
         self._render_data = []  # stored per-frame render info for last episode
         self.rewards = REWARDS
+        self._use_shaped = bool(REWARDS.get("use_shaped", False))
         self._last_sun = 0
         self._last_plants = {}
         self._last_zombies = {}
@@ -124,12 +124,11 @@ class SimPVZEnv:
     def reset(self, **kwargs):
         self._scene = self._new_scene()
         self._steps = 0
-        self._last_mask = self.mask_available_actions()
         self._last_sun = self._scene.sun
-        self._last_plants = self._snapshot_plants()
+        self._last_plants = self._snapshot_plants() if self._use_shaped else {}
         self._last_zombies = self._snapshot_zombies()
         self._last_wave_index = self._current_wave_index()
-        self._last_potential = self._calculate_potential()
+        self._last_potential = self._calculate_potential() if self._use_shaped else 0.0
         self._reward_details = {}
         self._episode_diagnostics = self._new_episode_diagnostics()
         if self._collect_render:
@@ -168,10 +167,11 @@ class SimPVZEnv:
             step_diagnostics,
         )
         state = self._build_state()
-        self._last_mask = self.mask_available_actions()
+        mask = self.mask_available_actions()
         self._steps += 1
         self._reward_details = details
-        info = self._build_info(episode_over, details)
+        info = self._build_info(episode_over, episode_win, details)
+        info["mask"] = mask
         return state, float(reward), bool(episode_over), info
 
     def mask_available_actions(self):
@@ -180,7 +180,6 @@ class SimPVZEnv:
         empty_cells, available_plants = self._scene.get_available_moves()
         if len(empty_cells[0]) == 0:
             return mask
-        grid_indices = empty_cells[0] * self.cols + empty_cells[1]
         for plant in available_plants:
             card_idx = self._plant_no[plant.__name__]
             if self.card_plant_ids[card_idx] not in self.enabled_plant_ids:
@@ -292,7 +291,8 @@ class SimPVZEnv:
             "plants_lost": 0,
             "sun_diff": 0,
         }
-        current_plants = self._snapshot_plants()
+        use_shaped = self._use_shaped
+        current_plants = self._snapshot_plants() if use_shaped else {}
         current_zombies = self._snapshot_zombies()
         current_wave_index = self._current_wave_index()
         damage = self._zombie_damage(current_zombies)
@@ -310,13 +310,12 @@ class SimPVZEnv:
                 reward += r_wait
                 details["wait_with_sun"] = r_wait
         elif planted_name is not None:
-            if self.rewards.get("use_shaped", False):
+            if use_shaped:
                 r_plant = self._plant_reward(planted_name)
                 if r_plant:
                     reward += r_plant
                     details["plant"] = r_plant
 
-        use_shaped = self.rewards.get("use_shaped", False)
         if use_shaped:
             r_survival = float(self.rewards.get("survival_per_step", 0.0))
             if r_survival:
@@ -364,7 +363,7 @@ class SimPVZEnv:
                     reward += r_sf
                     details["sunflower_lost"] = r_sf
 
-        potential = self._calculate_potential()
+        potential = self._calculate_potential() if use_shaped else 0.0
         if use_shaped:
             delta = max(-5.0, min(5.0, potential - self._last_potential))
             delta_scale = float(
@@ -602,7 +601,29 @@ class SimPVZEnv:
         return scene
 
     def _move_available(self):
-        return bool(np.any(self.mask_available_actions()[:self.wait_action]))
+        """Fast check: is at least one curriculum-valid action available?
+
+        Only iterates the plant deck (≤10 items) and checks cooldown/sun/grid
+        constraints — does NOT build the full 451-dim action mask.  The full
+        mask is computed once in ``mask_available_actions()`` when the agent
+        actually needs to choose an action.
+        """
+        if self._scene.grid.is_full():
+            return False
+        empty_rows = set(self._scene.grid.empty_cells()[0])
+        if not (empty_rows & self.enabled_rows):
+            return False
+        for plant_name, plant_cls in self.plant_deck.items():
+            cls_name = plant_cls.__name__
+            if cls_name not in self._plant_no:
+                continue
+            card_idx = self._plant_no[cls_name]
+            if self.card_plant_ids[card_idx] not in self.enabled_plant_ids:
+                continue
+            if (self._scene.plant_cooldowns[plant_name] <= 0
+                    and plant_cls.COST <= self._scene.sun):
+                return True
+        return False
 
     def _episode_status(self):
         if self._scene.lives <= 0:
@@ -628,10 +649,9 @@ class SimPVZEnv:
         spawner = self._scene._zombie_spawner
         return int(getattr(spawner, "completed_flag_waves", 0))
 
-    def _build_info(self, episode_over, reward_details):
+    def _build_info(self, episode_over, episode_win, reward_details):
         current_wave = self._current_wave_index()
         spawner = self._scene._zombie_spawner
-        _, episode_win = self._episode_status()
         return {
             "steps": min(self.timeout_frames, self._scene._chrono),
             "win": bool(episode_win),
