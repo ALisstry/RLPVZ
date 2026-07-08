@@ -1,4 +1,5 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
+import queue
 
 from sb3_contrib.common.maskable.utils import get_action_masks
 from stable_baselines3.common.vec_env import VecNormalize
@@ -136,6 +137,41 @@ def _ppo_parallel_worker(
             env.close()
 
 
+def _ppo_parallel_worker_proc(
+    result_queue,
+    stop_event,
+    args,
+    instance,
+    env_spec,
+    scenario_spec,
+    model_path,
+    device,
+    num_episodes,
+    start_index,
+    total_episodes,
+    worker_id,
+):
+    """Multiprocessing worker target — wraps _ppo_parallel_worker."""
+    try:
+        details = _ppo_parallel_worker(
+            args=args,
+            instance=instance,
+            env_spec=env_spec,
+            scenario_spec=scenario_spec,
+            model_path=model_path,
+            device=device,
+            num_episodes=num_episodes,
+            start_index=start_index,
+            total_episodes=total_episodes,
+            worker_id=worker_id,
+        )
+        result_queue.put(("ok", details))
+    except KeyboardInterrupt:
+        pass  # 被主进程终止，静默退出
+    except Exception as exc:
+        result_queue.put(("error", (worker_id, repr(exc))))
+
+
 def evaluate_ppo(
     args,
     model_path,
@@ -154,54 +190,66 @@ def evaluate_ppo(
     actual_workers = len(episode_splits)
 
     all_details = []
-    if actual_workers == 1:
-        env = get_env(
-            args,
-            instances[:1],
-            env_spec=env_spec,
-            scenario_spec=scenario_spec,
-            load_path=model_path,
+    ctx = mp.get_context("spawn")
+    stop_event = ctx.Event()
+    result_queue = ctx.Queue()
+
+    print(
+        f"[Eval][PPO] Dispatching {episodes} episodes "
+        f"across {actual_workers} workers (multiprocessing)"
+    )
+
+    processes = []
+    for worker_id, (start_idx, count) in enumerate(episode_splits):
+        p = ctx.Process(
+            target=_ppo_parallel_worker_proc,
+            args=(
+                result_queue, stop_event, args, instances[worker_id],
+                env_spec, scenario_spec, model_path, device, count,
+                start_idx, episodes, worker_id,
+            ),
         )
-        try:
-            model = get_model(args, env, device=device, load_path=model_path)
-            start_idx, count = episode_splits[0]
-            all_details = _ppo_worker_run(
-                model=model,
-                env=env,
-                num_episodes=count,
-                start_index=start_idx,
-                total_episodes=episodes,
-                worker_id=0,
-            )
-        finally:
-            env.close()
-    else:
+        p.start()
+        processes.append(p)
         print(
-            f"[Eval][PPO] Dispatching {episodes} episodes "
-            f"across {actual_workers} parallel workers"
+            f"[Eval][PPO] Worker {worker_id} started: "
+            f"pid={instances[worker_id]['pid']} port={instances[worker_id]['port']}"
         )
-        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-            futures = {}
-            for worker_id, (start_idx, count) in enumerate(episode_splits):
-                future = executor.submit(
-                    _ppo_parallel_worker,
-                    args=args,
-                    instance=instances[worker_id],
-                    env_spec=env_spec,
-                    scenario_spec=scenario_spec,
-                    model_path=model_path,
-                    device=device,
-                    num_episodes=count,
-                    start_index=start_idx,
-                    total_episodes=episodes,
-                    worker_id=worker_id,
-                )
-                futures[future] = worker_id
 
-            for future in as_completed(futures):
-                all_details.extend(future.result())
+    completed = 0
+    try:
+        while completed < len(processes):
+            try:
+                status, data = result_queue.get(timeout=1.0)
+            except queue.Empty:
+                for p in processes:
+                    if p.exitcode is not None and p.exitcode != 0:
+                        print(
+                            f"[Eval][PPO] Worker exited with "
+                            f"code {p.exitcode}",
+                            flush=True,
+                        )
+                continue
+            completed += 1
+            if status == "ok":
+                all_details.extend(data)
+            else:
+                wid, error = data
+                print(f"[Eval][PPO] Worker {wid} error: {error}", flush=True)
+    except KeyboardInterrupt:
+        print(
+            "\n[Eval][PPO] Interrupted, stopping workers...",
+            flush=True,
+        )
+        stop_event.set()
+    finally:
+        for p in processes:
+            p.join(timeout=3.0)
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=2.0)
 
-        all_details.sort(key=lambda d: d.episode_index)
+    all_details.sort(key=lambda d: d.episode_index)
 
     return summarize_eval_results(
         eval_id=eval_id,
