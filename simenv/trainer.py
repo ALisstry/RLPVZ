@@ -27,7 +27,9 @@ from training.evaluation import (
     EvaluationWriter,
     elapsed_since,
     new_eval_id,
+    summarize_diagnostics,
     summarize_eval_results,
+    summarize_plant_stats,
     time_eval_run,
 )
 
@@ -737,6 +739,7 @@ def _evaluate(network, n_episodes=20, episode=None, step=None, stage=None):
                     "timeout_frames": info.get("timeout_frames"),
                     "current_wave_index": info.get("current_wave_index"),
                     "is_flag_wave": info.get("is_flag_wave"),
+                    "diagnostics": info.get("diagnostics", {}),
                 },
             )
         )
@@ -760,8 +763,13 @@ def _evaluate(network, n_episodes=20, episode=None, step=None, stage=None):
             "target_frames": getattr(stage, "target_frames", None),
             "target_flag_waves": target_flag_waves,
             "timeout_frames": getattr(stage, "timeout_frames", None),
+            "diagnostics": summarize_diagnostics(details),
+            "plant_stats": summarize_plant_stats(details),
         },
     )
+    diagnostics = result.extra.get("diagnostics", {})
+    action_stats = diagnostics.get("action_stats", {})
+    plant_success = action_stats.get("plant_success_by_type", {})
     print(f"  {'Reward:':20s} mean={result.reward_mean:8.2f}  std={result.reward_std:8.2f}  "
           f"min={result.reward_min:8.2f}  max={result.reward_max:8.2f}")
     print(f"  {'Survival (frames):':20s} mean={result.survival_mean:8.2f}  std={result.survival_std:8.2f}  "
@@ -769,6 +777,18 @@ def _evaluate(network, n_episodes=20, episode=None, step=None, stage=None):
     print(f"  {'Survival (sec):':20s} mean={result.survival_mean / fps:8.2f}  std={result.survival_std / fps:8.2f}  "
           f"min={result.survival_min / fps:8.2f}  max={result.survival_max / fps:8.2f}")
     print(f"  {'Actions taken:':20s} mean={result.actions_mean or 0:8.2f}")
+    print(f"  {'Action stats:':20s} wait={int(action_stats.get('wait', 0))}  "
+          f"plant={int(action_stats.get('plant', 0))}  "
+          f"invalid={int(action_stats.get('invalid', 0))}")
+    if plant_success:
+        plant_text = ", ".join(
+            f"{name}={count}"
+            for name, count in sorted(
+                plant_success.items(),
+                key=lambda item: (-int(item[1]), item[0]),
+            )
+        )
+        print(f"  {'Plant success:':20s} {plant_text}")
     print(f"  {'Stage wins:':20s} {result.win_count}/{n_episodes} ({100 * result.win_rate:.1f}%)")
     print(f"{sep}\n")
     return result
