@@ -157,8 +157,8 @@ if __name__ == "__main__":
         burn_in=10000,
         batch_size=512,
         lr=1e-4,
-        network_update_freq=64,
-        network_sync_freq=5000,
+        network_update_freq=32,
+        network_sync_freq=2000,
         eval_episodes=100,
         plot_callback=plot_training,
     )

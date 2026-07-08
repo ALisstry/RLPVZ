@@ -29,6 +29,9 @@ ZOMBIE_SPAWN = {
 
 
 REWARDS = {
+    "use_shaped": False,
+    "reward_scale": 1.0,
+    "plant_lost_sun_cost_scale": 0.0,
     "zombie_kill": {
         "use_type_rewards": True,
         "default": 8.00,
@@ -37,21 +40,21 @@ REWARDS = {
         "conehead": 12.00,
         "buckethead": 20.00,
     },
-    "sun_collect": 0.01,
-    "wave_complete": 20.0,
-    "game_win": 50.0,
+    "sun_collect": 0.0,
+    "wave_complete": 0.0,
+    "game_win": 0.0,
     "streak_bonus": 0.0,
     "survival_per_step": 0.0,
-    "plant_sunflower": 0.10,
-    "plant_attacker": 0.35,
-    "plant_wall": 0.18,
-    "plant_other": 0.30,
-    "plant_lost": -0.25,
-    "sunflower_lost": -0.80,
-    "lawnmower_triggered": -50.0,
-    "game_lose": -6.0,
-    "invalid_action": -0.01,
-    "wait_with_sun": -0.02,
+    "plant_sunflower": 0.0,
+    "plant_attacker": 0.0,
+    "plant_wall": 0.0,
+    "plant_other": 0.0,
+    "plant_lost": 0.0,
+    "sunflower_lost": 0.0,
+    "lawnmower_triggered": 0.0,
+    "game_lose": 0.0,
+    "invalid_action": 0.0,
+    "wait_with_sun": 0.0,
     "wait_sun_threshold": 300,
     "coverage": {
         "scale": 0.0,
@@ -60,15 +63,15 @@ REWARDS = {
         "scale": 0.0,
     },
     "potential": {
-        "sun_scale": 0.06,
+        "sun_scale": 0.0,
         "sun_cap": 300.0,
-        "plant_scale": 0.22,
-        "spread_bonus": 0.06,
-        "lawnmower_scale": 0.35,
-        "zombie_threat_scale": 0.35,
-        "zombie_distance_bonus": 0.75,
-        "wave_scale": 0.05,
-        "delta_scale": 0.18,
+        "plant_scale": 0.0,
+        "spread_bonus": 0.0,
+        "lawnmower_scale": 0.0,
+        "zombie_threat_scale": 0.0,
+        "zombie_distance_bonus": 0.0,
+        "wave_scale": 0.0,
+        "delta_scale": 0.0,
     },
 }
 
@@ -150,15 +153,16 @@ CURRICULUM = {
                 },
             },
             {
-                "stage_name": "sim_stall_to_melon_full_rows",
+                "stage_name": "sim_cherry_stall_melon_full_rows",
                 "enabled_rows": [0, 1, 2, 3, 4],
                 "enabled_plants": [
                     Plants.Sunflower,
                     Plants.Potato_Mine,
                     Plants.Wallnut,
                     Plants.Squash,
+                    Plants.Cherry_Bomb,
                     Plants.Melon_pult,
-                ],  # Expand the same melon stall plan to all rows.
+                ],  # Add cherry bomb as full-row emergency support.
                 "initial_sun": 100,
                 "target_frames": 700,
                 "target_flag_waves": 2,
@@ -173,15 +177,16 @@ CURRICULUM = {
                 },
             },
             {
-                "stage_name": "sim_melon_core_real_sun",
+                "stage_name": "sim_cherry_melon_core_real_sun",
                 "enabled_rows": [0, 1, 2, 3, 4],
                 "enabled_plants": [
                     Plants.Sunflower,
                     Plants.Potato_Mine,
                     Plants.Wallnut,
                     Plants.Squash,
+                    Plants.Cherry_Bomb,
                     Plants.Melon_pult,
-                ],  # Lower to real-like opening sun without adding alternate attackers.
+                ],  # Lower to real-like opening sun while keeping cherry as emergency support.
                 "initial_sun": 50,
                 "target_frames": 700,
                 "target_flag_waves": 2,
@@ -196,15 +201,16 @@ CURRICULUM = {
                 },
             },
             {
-                "stage_name": "sim_melon_core_three_flags",
+                "stage_name": "sim_cherry_melon_core_three_flags",
                 "enabled_rows": [0, 1, 2, 3, 4],
                 "enabled_plants": [
                     Plants.Sunflower,
                     Plants.Potato_Mine,
                     Plants.Wallnut,
                     Plants.Squash,
+                    Plants.Cherry_Bomb,
                     Plants.Melon_pult,
-                ],  # Final target extends the real-sun melon setup to three flag waves.
+                ],  # Final target extends the cherry-supported melon setup to three flag waves.
                 "initial_sun": 50,
                 "target_frames": 800,
                 "target_flag_waves": 3,
