@@ -104,6 +104,84 @@ class DDQNNetwork(nn.Module):
         return self.network(state_t)
 
 
+class DifferentialDDQNNetwork(DDQNNetwork):
+    """Differential Q-Network: Q(s,a) = Q(s,wait) + Δ(s,a),  Δ(s,wait) ≡ 0.
+
+    Splits after a shared trunk into two heads:
+        wait_head(s)  → Q(s, wait) ∈ R
+        delta_head(s) → Δ(s, ·) ∈ R^{n_actions}
+
+    Q(s, a) = Q(s, wait) + Δ(s, a)
+    """
+
+    def __init__(self, env, learning_rate=1e-3, device="cpu",
+                 hidden_sizes=None):
+        super().__init__(env, learning_rate=learning_rate, device=device,
+                         hidden_sizes=hidden_sizes)
+        if hidden_sizes is None:
+            hidden_sizes = [2048, 2048]
+
+        if len(hidden_sizes) >= 2:
+            trunk_sizes = hidden_sizes[:-1]
+            branch_in = hidden_sizes[-1]
+        else:
+            trunk_sizes = []
+            branch_in = hidden_sizes[0]
+
+        # ── Rebuild trunk ──
+        trunk_layers = []
+        prev = self.n_inputs
+        for h in trunk_sizes:
+            trunk_layers.append(nn.Linear(prev, h, bias=True))
+            trunk_layers.append(nn.LeakyReLU())
+            prev = h
+        self.trunk = nn.Sequential(*trunk_layers) if trunk_layers else nn.Identity()
+        trunk_out = prev if trunk_sizes else self.n_inputs
+
+        # ── Wait baseline head ──
+        self.wait_head = nn.Sequential(
+            nn.Linear(trunk_out, branch_in, bias=True),
+            nn.LeakyReLU(),
+            nn.Linear(branch_in, 1, bias=True),
+        )
+
+        # ── Delta head ──
+        self.delta_head = nn.Sequential(
+            nn.Linear(trunk_out, branch_in, bias=True),
+            nn.LeakyReLU(),
+            nn.Linear(branch_in, self.n_outputs, bias=True),
+        )
+
+        self.network = None
+        self._wait_idx = self.n_outputs - 1
+
+        if self.device == "cuda":
+            self.to("cuda")
+
+        self.optimizer = torch.optim.Adam(
+            filter(lambda p: p.requires_grad, self.parameters()),
+            lr=self.learning_rate,
+        )
+
+    def get_qvals(self, state):
+        if isinstance(state, (list, tuple)):
+            state = np.array(state)
+        state_t = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        single = state_t.dim() == 1
+        if single:
+            state_t = state_t.unsqueeze(0)
+
+        shared = self.trunk(state_t)
+        q_wait = self.wait_head(shared)
+        delta = self.delta_head(shared)
+        delta[:, self._wait_idx] = 0.0
+
+        qvals = q_wait + delta
+        if single:
+            qvals = qvals.squeeze(0)
+        return qvals
+
+
 def transform_observation(observation):
     return observation.astype(np.float32)
 
@@ -171,12 +249,23 @@ def calculate_loss(network, target_network, batch, gamma):
     with torch.no_grad():
         td_error = float((expected_qvals - qvals).abs().mean().cpu().item())
 
+    # ── Wait-baseline / differential statistics (always computed) ─────
+    with torch.no_grad():
+        q_wait = all_qvals[:, -1]
+        delta_all = all_qvals - q_wait.unsqueeze(-1)
+        q_wait_mean = float(q_wait.mean().cpu().item())
+        delta_mean = float(delta_all.mean().cpu().item())
+        delta_max = float(delta_all.max(dim=1).values.mean().cpu().item())
+
     diagnostics = {
         "advantage": advantage,
         "entropy": entropy,
         "mean_q": mean_q,
         "max_q": max_q,
         "td_error": td_error,
+        "q_wait": q_wait_mean,
+        "delta_mean": delta_mean,
+        "delta_max": delta_max,
     }
 
     return LossResult(

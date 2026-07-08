@@ -18,7 +18,8 @@ from simenv.config import CURRICULUM
 from simenv.curriculum import build_curriculum
 from simenv.pvz_sim import config
 from simenv.model import (
-    ReplayBuffer, DDQNNetwork, transform_observation, calculate_loss, LossResult,
+    ReplayBuffer, DDQNNetwork, DifferentialDDQNNetwork,
+    transform_observation, calculate_loss, LossResult,
 )
 from training.evaluation import (
     BestEvaluationCheckpoint,
@@ -64,6 +65,7 @@ def train_sim(
     visualize=False,
     plot_freq=100,
     plot_callback=None,
+    use_differential=False,
 ):
     if save_path is None:
         save_path = _default_save_path("ddqn", "sim_ddqn.pt")
@@ -94,7 +96,8 @@ def train_sim(
     )
     if getattr(curriculum, "enabled", True):
         env.apply_stage(curriculum.current_stage)
-    network = DDQNNetwork(env, learning_rate=lr, device=device)
+    NetworkCls = DifferentialDDQNNetwork if use_differential else DDQNNetwork
+    network = NetworkCls(env, learning_rate=lr, device=device)
     target_network = deepcopy(network)
     buffer = ReplayBuffer(memory_size=buffer_size, burn_in=burn_in)
     threshold = EpsilonSchedule(
@@ -105,7 +108,7 @@ def train_sim(
 
     _print_config(
         device=device,
-        network_type="ddqn",
+        network_type="ddqn_differential" if use_differential else "ddqn",
         network_params=sum(p.numel() for p in network.parameters()),
         max_episodes=max_episodes,
         buffer_size=buffer_size,
@@ -148,23 +151,18 @@ def train_sim(
     )
 
     training_rewards = []
-    training_loss = []
     training_iterations = []
-    update_loss = []
-    # Per-step diagnostic accumulators (averaged per episode)
-    update_advantage = []
-    update_entropy = []
-    update_mean_q = []
-    update_max_q = []
-    update_td_error = []
-    update_grad_norm = []
-    # Per-episode averaged metrics
+    # Per‑training‑step diagnostics (one entry per optimizer step)
+    training_loss = []
     training_advantage = []
     training_entropy = []
     training_mean_q = []
     training_max_q = []
     training_td_error = []
     training_grad_norm = []
+    training_q_wait = []
+    training_delta_mean = []
+    training_delta_max = []
     step_count = 0
     window = 100
     last_eval_episode = None
@@ -192,6 +190,9 @@ def train_sim(
                 training_max_q=training_max_q,
                 training_td_error=training_td_error,
                 training_grad_norm=training_grad_norm,
+                training_q_wait=training_q_wait,
+                training_delta_mean=training_delta_mean,
+                training_delta_max=training_delta_max,
                 plot_callback=plot_callback,
             )
 
@@ -244,13 +245,16 @@ def train_sim(
                 grad_norm = total_norm ** 0.5
                 nn.utils.clip_grad_norm_(network.parameters(), max_grad_norm)
                 network.optimizer.step()
-                update_loss.append(result.loss.detach().item())
-                update_advantage.append(result.diagnostics["advantage"])
-                update_entropy.append(result.diagnostics["entropy"])
-                update_mean_q.append(result.diagnostics["mean_q"])
-                update_max_q.append(result.diagnostics["max_q"])
-                update_td_error.append(result.diagnostics["td_error"])
-                update_grad_norm.append(grad_norm)
+                training_loss.append(result.loss.detach().item())
+                training_advantage.append(result.diagnostics["advantage"])
+                training_entropy.append(result.diagnostics["entropy"])
+                training_mean_q.append(result.diagnostics["mean_q"])
+                training_max_q.append(result.diagnostics["max_q"])
+                training_td_error.append(result.diagnostics["td_error"])
+                training_grad_norm.append(grad_norm)
+                training_q_wait.append(result.diagnostics["q_wait"])
+                training_delta_mean.append(result.diagnostics["delta_mean"])
+                training_delta_max.append(result.diagnostics["delta_max"])
 
             if step_count % network_sync_freq == 0:
                 target_network.load_state_dict(network.state_dict())
@@ -259,21 +263,6 @@ def train_sim(
                 ep += 1
                 training_rewards.append(rewards)
                 training_iterations.append(float(info.get("steps", env._scene._chrono)))
-                if update_loss:
-                    training_loss.append(np.mean(update_loss))
-                    training_advantage.append(np.mean(update_advantage))
-                    training_entropy.append(np.mean(update_entropy))
-                    training_mean_q.append(np.mean(update_mean_q))
-                    training_max_q.append(np.mean(update_max_q))
-                    training_td_error.append(np.mean(update_td_error))
-                    training_grad_norm.append(np.mean(update_grad_norm))
-                update_loss = []
-                update_advantage = []
-                update_entropy = []
-                update_mean_q = []
-                update_max_q = []
-                update_td_error = []
-                update_grad_norm = []
 
                 old_stage = curriculum.current_stage_name
                 curriculum.record_episode()
@@ -323,14 +312,15 @@ def train_sim(
 
                 if ep % 100 == 0:
                     gc.collect()
+                    step_win = max(100, window * network_update_freq)
                     mean_r = np.mean(training_rewards[-window:])
                     mean_i = np.mean(training_iterations[-window:])
-                    mean_l = np.mean(training_loss[-window:]) if training_loss else 0
-                    mean_adv = np.mean(training_advantage[-window:]) if training_advantage else 0
-                    mean_ent = np.mean(training_entropy[-window:]) if training_entropy else 0
-                    mean_q = np.mean(training_mean_q[-window:]) if training_mean_q else 0
-                    mean_td = np.mean(training_td_error[-window:]) if training_td_error else 0
-                    mean_gn = np.mean(training_grad_norm[-window:]) if training_grad_norm else 0
+                    mean_l = np.nanmean(training_loss[-step_win:]) if training_loss else 0
+                    mean_adv = np.nanmean(training_advantage[-step_win:]) if training_advantage else 0
+                    mean_ent = np.nanmean(training_entropy[-step_win:]) if training_entropy else 0
+                    mean_q = np.nanmean(training_mean_q[-step_win:]) if training_mean_q else 0
+                    mean_td = np.nanmean(training_td_error[-step_win:]) if training_td_error else 0
+                    mean_gn = np.nanmean(training_grad_norm[-step_win:]) if training_grad_norm else 0
                     print(f"Episode {ep:5d}/{max_episodes}  "
                           f"Stage {curriculum.current_stage_name}  "
                           f"stage_episode={curriculum.stage_episode}  "
@@ -351,6 +341,9 @@ def train_sim(
                         training_max_q=training_max_q,
                         training_td_error=training_td_error,
                         training_grad_norm=training_grad_norm,
+                        training_q_wait=training_q_wait,
+                        training_delta_mean=training_delta_mean,
+                        training_delta_max=training_delta_max,
                         plot_callback=plot_callback,
                     )
 
@@ -396,6 +389,9 @@ def train_sim(
         training_max_q=training_max_q,
         training_td_error=training_td_error,
         training_grad_norm=training_grad_norm,
+        training_q_wait=training_q_wait,
+        training_delta_mean=training_delta_mean,
+        training_delta_max=training_delta_max,
         plot_callback=plot_callback,
     )
     print("Training complete.")
@@ -701,6 +697,9 @@ def _save_training_checkpoint(
     training_max_q=None,
     training_td_error=None,
     training_grad_norm=None,
+    training_q_wait=None,
+    training_delta_mean=None,
+    training_delta_max=None,
     plot_callback=None,
 ):
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -717,6 +716,9 @@ def _save_training_checkpoint(
         training_max_q=training_max_q,
         training_td_error=training_td_error,
         training_grad_norm=training_grad_norm,
+        training_q_wait=training_q_wait,
+        training_delta_mean=training_delta_mean,
+        training_delta_max=training_delta_max,
         plot_callback=plot_callback,
     )
 
@@ -732,6 +734,9 @@ def _save_training_artifacts(
     training_max_q=None,
     training_td_error=None,
     training_grad_norm=None,
+    training_q_wait=None,
+    training_delta_mean=None,
+    training_delta_max=None,
     plot_callback=None,
 ):
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -748,6 +753,9 @@ def _save_training_artifacts(
         ("max_q", training_max_q),
         ("td_error", training_td_error),
         ("grad_norm", training_grad_norm),
+        ("q_wait", training_q_wait),
+        ("delta_mean", training_delta_mean),
+        ("delta_max", training_delta_max),
     ]:
         if data is not None and len(data) > 0:
             np.save(
@@ -764,6 +772,9 @@ def _save_training_artifacts(
             max_q=np.array(training_max_q) if training_max_q else None,
             td_error=np.array(training_td_error) if training_td_error else None,
             grad_norm=np.array(training_grad_norm) if training_grad_norm else None,
+            q_wait=np.array(training_q_wait) if training_q_wait else None,
+            delta_mean=np.array(training_delta_mean) if training_delta_mean else None,
+            delta_max=np.array(training_delta_max) if training_delta_max else None,
         )
 
 

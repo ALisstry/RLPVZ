@@ -13,19 +13,34 @@ import numpy as np
 
 
 def _rolling_mean(data, window):
-    """Return (x, y) where y is the rolling mean and x is aligned to the
-    first index of each window (so the curve lines up with the raw data)."""
+    """Return (x, y) where y is the NaN-aware rolling mean and x is aligned
+    to the first index of each window.
+
+    NaN values are ignored in the mean computation, so episodes with no
+    training steps do not pull the rolling average toward zero.
+    """
     data = np.asarray(data, dtype=np.float64)
-    if len(data) < window:
-        return np.arange(len(data)), data
-    smoothed = np.convolve(data, np.ones(window) / window, mode="valid")
-    x = np.arange(window - 1, len(data))
+    n = len(data)
+    if n < window:
+        return np.arange(n), data
+    # NaN-aware via cumsum — prepend 0 so rolling windows are correct
+    finite = np.isfinite(data)
+    data_filled = np.where(finite, data, 0.0)
+    cumsum = np.concatenate([[0.0], np.cumsum(data_filled)])
+    cumcount = np.concatenate([[0.0], np.cumsum(finite.astype(np.float64))])
+    rolling_sum = cumsum[window:] - cumsum[:n - window + 1]
+    rolling_count = cumcount[window:] - cumcount[:n - window + 1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        smoothed = rolling_sum / rolling_count
+    smoothed[rolling_count == 0] = np.nan
+    x = np.arange(window - 1, n)
     return x, smoothed
 
 
 def plot_training(save_path, rewards, iterations, loss,
                   advantage=None, entropy=None, mean_q=None,
-                  max_q=None, td_error=None, grad_norm=None):
+                  max_q=None, td_error=None, grad_norm=None,
+                  q_wait=None, delta_mean=None, delta_max=None):
     """3×4 training dashboard matching the DDQN LivePlotter style.
 
     Parameters are the per-episode metric arrays.  Eval data is loaded
@@ -45,7 +60,9 @@ def plot_training(save_path, rewards, iterations, loss,
         return
 
     window = min(100, max(1, len(rewards)))
+    step_window = min(500, max(1, len(loss) if loss is not None and len(loss) > 0 else 500))
     max_episodes = len(rewards)
+    max_steps = len(loss) if loss is not None and len(loss) > 0 else 0
 
     # ── Load eval data from CSV ────────────────────────────────────────
     eval_episodes = []
@@ -77,29 +94,31 @@ def plot_training(save_path, rewards, iterations, loss,
     # ── Figure setup: 3×4 grid ─────────────────────────────────────────
     fig, axes = plt.subplots(3, 4, figsize=(22, 14))
     fig.suptitle(
-        f"Sim DDQN Training Dashboard  —  Episodes {max_episodes}  |  "
+        f"Sim DDQN Training Dashboard  —  Ep {max_episodes}  "
+        f"Steps {max_steps}  |  "
         f"Mean Reward: {np.mean(rewards[-window:]):.1f}",
         fontsize=17, fontweight="bold", y=0.98,
     )
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
     # ── Helper: standard metric subplot ────────────────────────────────
-    def _plot_metric(ax, data, title, xlabel, ylabel, color):
+    def _plot_metric(ax, data, title, xlabel, ylabel, color, *, ma_win=None):
         if data is None or len(data) == 0:
             ax.text(0.5, 0.5, "No data yet", transform=ax.transAxes,
                     ha="center", va="center", fontsize=10, color="gray")
             ax.set_title(title, fontsize=11, fontweight="bold")
             return
+        w = ma_win if ma_win is not None else window
         episodes = np.arange(len(data))
         ax.plot(episodes, data, alpha=0.25, color=color, linewidth=0.6)
-        sx, sy = _rolling_mean(data, window)
-        ax.plot(sx, sy, color=color, linewidth=1.8, label=f"MA{window}")
+        sx, sy = _rolling_mean(data, w)
+        ax.plot(sx, sy, color=color, linewidth=1.8, label=f"MA{w}")
         ax.legend(fontsize=7, loc="best")
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.tick_params(labelsize=8)
-        ax.set_xlim(0, max(len(data), max_episodes))
+        ax.set_xlim(0, max(len(data), 1))
         ax.grid(True, alpha=0.3)
 
     # ── Row 0 ──────────────────────────────────────────────────────────
@@ -111,46 +130,69 @@ def plot_training(save_path, rewards, iterations, loss,
                            label="Eval", edgecolors="black", linewidths=0.3)
         axes[0, 0].legend(fontsize=7, loc="best")
 
-    _plot_metric(axes[0, 1], loss, "Training Loss (MSE)",
-                 "Episode", "Loss", color="tab:red")
+    _plot_metric(axes[0, 1], loss, "Training Loss (Huber)",
+                 "Update Step", "Loss", color="tab:red", ma_win=step_window)
 
-    # Q-Value Statistics (mean + max together)
+    # Q-Value & Differential Statistics
     ax_q = axes[0, 2]
     has_q = False
     if mean_q is not None and len(mean_q) > 0:
-        sx, sy = _rolling_mean(mean_q, window)
+        sx, sy = _rolling_mean(mean_q, step_window)
         ax_q.plot(sx, sy, color="tab:blue", linewidth=1.8,
-                  label=f"Mean Q (MA{window})")
+                  label=f"Mean Q (MA{step_window})")
         has_q = True
     if max_q is not None and len(max_q) > 0:
-        sx, sy = _rolling_mean(max_q, window)
+        sx, sy = _rolling_mean(max_q, step_window)
         ax_q.plot(sx, sy, color="tab:orange", linewidth=1.8,
-                  label=f"Max Q (MA{window})")
+                  label=f"Max Q (MA{step_window})")
+        has_q = True
+    if q_wait is not None and len(q_wait) > 0:
+        sx, sy = _rolling_mean(q_wait, step_window)
+        ax_q.plot(sx, sy, color="tab:green", linewidth=1.5, linestyle="--",
+                  label=f"Q(wait) (MA{step_window})")
+        has_q = True
+    if delta_mean is not None and len(delta_mean) > 0:
+        sx, sy = _rolling_mean(delta_mean, step_window)
+        ax_q.plot(sx, sy, color="tab:red", linewidth=1.5, linestyle=":",
+                  label=f"Δ mean (MA{step_window})")
+        ax_q.axhline(y=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
+        has_q = True
+    if delta_max is not None and len(delta_max) > 0:
+        sx, sy = _rolling_mean(delta_max, step_window)
+        ax_q.plot(sx, sy, color="tab:purple", linewidth=1.2, linestyle="-.",
+                  label=f"Δ max (MA{step_window})")
         has_q = True
     if not has_q:
         ax_q.text(0.5, 0.5, "No data yet", transform=ax_q.transAxes,
                   ha="center", va="center", fontsize=10, color="gray")
-    ax_q.set_title("Q-Value Statistics", fontsize=11, fontweight="bold")
-    ax_q.set_xlabel("Episode")
+    # Diagnostic gap annotation
+    if all(v is not None and len(v) > 0 for v in (mean_q, q_wait)):
+        gap = mean_q[-1] - q_wait[-1]
+        ax_q.text(0.98, 0.02, f"gap(MeanQ-Qwait)={gap:+.4f}",
+                  transform=ax_q.transAxes, ha="right", va="bottom",
+                  fontsize=7, color="gray",
+                  bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
+    ax_q.set_title("Q-Value & Differential Stats", fontsize=11, fontweight="bold")
+    ax_q.set_xlabel("Update Step")
     ax_q.set_ylabel("Q-Value")
     ax_q.tick_params(labelsize=8)
-    ax_q.legend(fontsize=7, loc="best")
+    ax_q.legend(fontsize=6, loc="best")
     ax_q.grid(True, alpha=0.3)
 
     _plot_metric(axes[0, 3], td_error, "|TD Error|",
-                 "Episode", "|TD Error|", color="tab:purple")
+                 "Update Step", "|TD Error|", color="tab:purple", ma_win=step_window)
 
     # ── Row 1 ──────────────────────────────────────────────────────────
     _plot_metric(axes[1, 0], advantage, "Mean Advantage  A(s,a)",
-                 "Episode", "Advantage", color="tab:green")
+                 "Update Step", "Advantage", color="tab:green", ma_win=step_window)
     axes[1, 0].axhline(y=0, color="gray", linestyle="--",
                        linewidth=0.8, alpha=0.6)
 
     _plot_metric(axes[1, 1], entropy, "Policy Entropy",
-                 "Episode", "Entropy (nats)", color="tab:cyan")
+                 "Update Step", "Entropy (nats)", color="tab:cyan", ma_win=step_window)
 
     _plot_metric(axes[1, 2], grad_norm, "Gradient Norm",
-                 "Episode", r"$||\nabla||_2$", color="tab:brown")
+                 "Update Step", r"$||\nabla||_2$", color="tab:brown", ma_win=step_window)
 
     # Eval Score History (replaces epsilon subplot from reference)
     ax_eval = axes[1, 3]
@@ -195,15 +237,15 @@ def plot_training(save_path, rewards, iterations, loss,
     # Loss (Log Scale)
     ax_logl = axes[2, 2]
     if loss is not None and len(loss) > 0:
-        sx, sy = _rolling_mean(loss, window)
+        sx, sy = _rolling_mean(loss, step_window)
         ax_logl.semilogy(sx, sy + 1e-10, color="tab:red", linewidth=1.8,
-                         label=f"Loss (log, MA{window})")
+                         label=f"Loss (log, MA{step_window})")
         ax_logl.legend(fontsize=7, loc="best")
     else:
         ax_logl.text(0.5, 0.5, "No data yet", transform=ax_logl.transAxes,
                      ha="center", va="center", fontsize=10, color="gray")
     ax_logl.set_title("Loss (Log Scale)", fontsize=11, fontweight="bold")
-    ax_logl.set_xlabel("Episode")
+    ax_logl.set_xlabel("Update Step")
     ax_logl.set_ylabel("Loss")
     ax_logl.tick_params(labelsize=8)
     ax_logl.grid(True, alpha=0.3, which="both")
@@ -224,10 +266,11 @@ def plot_training(save_path, rewards, iterations, loss,
     ax_sc.tick_params(labelsize=8)
     ax_sc.grid(True, alpha=0.3)
 
-    # ── Stage-change markers ───────────────────────────────────────────
+    # ── Stage-change markers (episode-based subplots only) ────────────
     if stage_events:
+        episode_axes = [axes[0, 0], axes[1, 3], axes[2, 0], axes[2, 1]]
         for idx, (ep, stage_name) in enumerate(stage_events):
-            for ax in axes.flat:
+            for ax in episode_axes:
                 ax.axvline(ep, color="tab:red", linestyle="--",
                            linewidth=1.0, alpha=0.7,
                            label="stage change" if idx == 0 else None)
@@ -248,7 +291,13 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Train DDQN agent on SimPVZ")
-    parser.parse_args()
+    parser.add_argument(
+        "--use_differential",
+        action="store_true",
+        default=False,
+        help="Use Differential Q-Network: Q(s,a) = Q(s,wait) + Δ(s,a)",
+    )
+    args = parser.parse_args()
 
     from simenv.trainer import train_sim
     train_sim(
@@ -261,4 +310,5 @@ if __name__ == "__main__":
         network_sync_freq=2000,
         eval_episodes=100,
         plot_callback=plot_training,
+        use_differential=args.use_differential,
     )
