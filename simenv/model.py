@@ -54,7 +54,7 @@ class DDQNNetwork(nn.Module):
         self.learning_rate = learning_rate
 
         if hidden_sizes is None:
-            hidden_sizes = [2048, 1024]
+            hidden_sizes = [2048, 2048]
 
         layers = []
         prev_size = self.n_inputs
