@@ -40,6 +40,9 @@ def _ppo_worker_run(model, env, num_episodes, start_index, total_episodes, worke
 
     episode_reward = 0.0
     episode_actions = 0
+    _wait_idx = env.action_space.n - 1 if hasattr(env, 'action_space') else 0
+    _wait_choice = 0
+    _wait_forced = 0
 
     while len(details) < num_episodes:
         action_masks = get_action_masks(env)
@@ -48,6 +51,16 @@ def _ppo_worker_run(model, env, num_episodes, start_index, total_episodes, worke
             deterministic=True,
             action_masks=action_masks,
         )
+        _act = int(actions[0]) if hasattr(actions, '__len__') else int(actions)
+        if _act == _wait_idx and action_masks is not None:
+            _am = action_masks[0] if hasattr(action_masks, '__len__') else action_masks
+            # wait 以外是否有可用动作
+            if _am is not None and len(_am) > 1:
+                if any(_am[:-1]):
+                    _wait_choice += 1
+                else:
+                    _wait_forced += 1
+
         obs, rewards, dones, infos = env.step(actions)
 
         # Single-env mode: unpack scalar values
@@ -62,6 +75,11 @@ def _ppo_worker_run(model, env, num_episodes, start_index, total_episodes, worke
             continue
 
         episode_index = start_index + len(details) + 1
+        _diag = dict(info.get("diagnostics", {}))
+        _diag["step_timing"] = {
+            "wait_choice": _wait_choice,
+            "wait_forced": _wait_forced,
+        }
         details.append(
             EpisodeEvalResult(
                 eval_id="",
@@ -89,7 +107,7 @@ def _ppo_worker_run(model, env, num_episodes, start_index, total_episodes, worke
                         "sublevel_cleared_this_step"
                     ),
                     "plant_stats": info.get("plant_stats", {}),
-                    "diagnostics": info.get("diagnostics", {}),
+                    "diagnostics": _diag,
                 },
             )
         )
@@ -98,11 +116,14 @@ def _ppo_worker_run(model, env, num_episodes, start_index, total_episodes, worke
             f"reward={details[-1].reward:.2f} | "
             f"survival={details[-1].survival:.0f} | "
             f"win={details[-1].win} | "
-            f"actions={details[-1].actions}",
+            f"actions={details[-1].actions} | "
+            f"wait(choice={_wait_choice}, forced={_wait_forced})",
             flush=True,
         )
         episode_reward = 0.0
         episode_actions = 0
+        _wait_choice = 0
+        _wait_forced = 0
         if len(details) >= num_episodes:
             break
 

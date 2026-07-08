@@ -71,6 +71,7 @@ def _random_worker_run(
             env_spec=env_spec,
             scenario_spec=scenario_spec,
         )
+        _wait_idx = env.action_space.n - 1
         for i in range(num_episodes):
             if stop_event and stop_event.is_set():
                 break
@@ -79,6 +80,8 @@ def _random_worker_run(
             total_reward = 0.0
             actions = 0
             info = {}
+            _wait_choice = 0   # 能种却选了 wait
+            _wait_forced = 0   # 只能 wait
             _ep_step_times = []  # 记录每步耗时用于诊断
             _ep_gaps = []        # 记录相邻 step 完成的时间间隔
             _prev_done_ts = __import__("time").time()  # 上一轮 step 完成的时间戳
@@ -92,6 +95,12 @@ def _random_worker_run(
                 else:
                     # mask 全为零时的安全兜底：使用 wait 动作（最后一个动作）
                     action = len(mask) - 1
+                if action == _wait_idx:
+                    _has_nonwait = any(mask[:-1]) if len(mask) > 1 else False
+                    if _has_nonwait:
+                        _wait_choice += 1
+                    else:
+                        _wait_forced += 1
                     print(
                         f"[Benchmark][Random][W{worker_id}] WARNING: "
                         f"empty action mask at episode {start_index + i + 1} "
@@ -128,6 +137,8 @@ def _random_worker_run(
                 "slow_steps": sum(1 for t in _ep_step_times if t > 1.0),
                 "mean_sec": float(sum(_ep_step_times) / len(_ep_step_times))
                 if _ep_step_times else 0.0,
+                "wait_choice": _wait_choice,
+                "wait_forced": _wait_forced,
             }
             _diag = dict(info.get("diagnostics", {}))
             _diag["step_timing"] = _step_timing
@@ -166,6 +177,7 @@ def _random_worker_run(
                 f"survival={details[-1].survival:.0f} | "
                 f"win={details[-1].win} | "
                 f"actions={actions} | "
+                f"wait(choice={_wait_choice}, forced={_wait_forced}) | "
                 f"max_gap={_st['max_gap_sec']:.2f}s | "
                 f"step_time(total={_st['total_sec']:.1f}s, max={_st['max_sec']:.2f}s, "
                 f"slow={_st['slow_steps']}, mean={_st['mean_sec']*1000:.0f}ms)",
@@ -578,6 +590,8 @@ def _write_diagnostics(result, output_dir):
         "step_max_gap_sec",
         "step_slow_count",
         "step_mean_sec",
+        "wait_choice",
+        "wait_forced",
         "reward_breakdown",
     ]
     with open(csv_path, "w", encoding="utf-8", newline="") as file:

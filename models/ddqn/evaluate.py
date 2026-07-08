@@ -2,6 +2,7 @@ import multiprocessing as mp
 import os
 import queue
 
+import numpy as np
 import torch
 
 from training.evaluation import (
@@ -38,6 +39,7 @@ def _split_episodes(total, num_workers):
 def _ddqn_worker_run(env, network, num_episodes, start_index, total_episodes, worker_id):
     """Run DDQN eval episodes on a single env (used by parallel workers)."""
     details = []
+    _wait_idx = env.action_space.n - 1
     for i in range(num_episodes):
         state = env.reset()
         done = False
@@ -46,10 +48,17 @@ def _ddqn_worker_run(env, network, num_episodes, start_index, total_episodes, wo
         info = {}
         _ep_step_times = []
         _ep_gaps = []
+        _wait_choice = 0   # 能种却选了 wait
+        _wait_forced = 0   # 只能 wait（冷却/阳光/满格）
         _prev_done_ts = __import__("time").time()
         while not done:
             mask = env.mask_available_actions()
             action = network.get_greedy_action(state, mask)
+            if action == _wait_idx:
+                if np.any(mask[:-1]):
+                    _wait_choice += 1
+                else:
+                    _wait_forced += 1
             _t0 = __import__("time").time()
             state, reward, done, info = env.step(action)
             _dt = __import__("time").time() - _t0
@@ -78,6 +87,8 @@ def _ddqn_worker_run(env, network, num_episodes, start_index, total_episodes, wo
             "slow_steps": sum(1 for t in _ep_step_times if t > 1.0),
             "mean_sec": float(sum(_ep_step_times) / len(_ep_step_times))
             if _ep_step_times else 0.0,
+            "wait_choice": _wait_choice,
+            "wait_forced": _wait_forced,
         }
         details.append(
             EpisodeEvalResult(
@@ -108,6 +119,7 @@ def _ddqn_worker_run(env, network, num_episodes, start_index, total_episodes, wo
             f"survival={details[-1].survival:.0f} | "
             f"win={details[-1].win} | "
             f"actions={actions} | "
+            f"wait(choice={_wait_choice}, forced={_wait_forced}) | "
             f"max_gap={_st.get('max_gap_sec', 0):.2f}s | "
             f"step_time(total={_st['total_sec']:.1f}s, max={_st['max_sec']:.2f}s, "
             f"slow={_st['slow_steps']}, mean={_st['mean_sec']*1000:.0f}ms)",
@@ -431,6 +443,7 @@ def _evaluate_with_envs(
     start_time = time_eval_run()
     details = []
 
+    _wait_idx = envs[0].action_space.n - 1
     for index in range(episodes):
         env = envs[index % len(envs)]
         state = env.reset()
@@ -440,10 +453,17 @@ def _evaluate_with_envs(
         info = {}
         _ep_step_times = []
         _ep_gaps = []
+        _wait_choice = 0
+        _wait_forced = 0
         _prev_done_ts = __import__("time").time()
         while not done:
             mask = env.mask_available_actions()
             action = network.get_greedy_action(state, mask)
+            if action == _wait_idx:
+                if np.any(mask[:-1]):
+                    _wait_choice += 1
+                else:
+                    _wait_forced += 1
             _t0 = __import__("time").time()
             state, reward, done, info = env.step(action)
             _dt = __import__("time").time() - _t0
@@ -471,6 +491,8 @@ def _evaluate_with_envs(
             "slow_steps": sum(1 for t in _ep_step_times if t > 1.0),
             "mean_sec": float(sum(_ep_step_times) / len(_ep_step_times))
             if _ep_step_times else 0.0,
+            "wait_choice": _wait_choice,
+            "wait_forced": _wait_forced,
         }
         details.append(
             EpisodeEvalResult(
@@ -501,6 +523,7 @@ def _evaluate_with_envs(
             f"survival={details[-1].survival:.0f} | "
             f"win={details[-1].win} | "
             f"actions={actions} | "
+            f"wait(choice={_wait_choice}, forced={_wait_forced}) | "
             f"max_gap={_st.get('max_gap_sec', 0):.2f}s | "
             f"step_time(total={_st['total_sec']:.1f}s, max={_st['max_sec']:.2f}s, "
             f"slow={_st['slow_steps']}, mean={_st['mean_sec']*1000:.0f}ms)",
