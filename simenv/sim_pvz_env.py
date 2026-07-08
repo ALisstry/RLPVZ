@@ -14,14 +14,14 @@ ZOMBIE_HP_NORM = 3000.0
 CARD_SPECS = (
     ("sunflower", "Sunflower", 1, Sunflower),
     ("peashooter", "Peashooter", 0, Peashooter),
-    ("snow-pea", "Snow Pea", 5, SnowPea),
-    ("repeater", "Repeater", 7, Repeater),
+    ("potatomine", "Potato Mine", 4, Potatomine),
     ("wall-nut", "Wall-nut", 3, Wallnut),
+    ("repeater", "Repeater", 7, Repeater),
     ("squash", "Squash", 17, Squash),
     ("cherry-bomb", "Cherry Bomb", 2, CherryBomb),
-    ("spikeweed", "Spikeweed", 21, Spikeweed),
-    ("kernel-pult", "Kernel-pult", 34, KernelPult),
+    ("snow-pea", "Snow Pea", 5, SnowPea),
     ("melon-pult", "Melon-pult", 39, MelonPult),
+    ("spikeweed", "Spikeweed", 21, Spikeweed),
 )
 
 
@@ -90,9 +90,11 @@ class SimPVZEnv:
         self.rewards = REWARDS
         self._last_sun = 0
         self._last_plants = {}
+        self._last_zombies = {}
         self._last_wave_index = 0
         self._last_potential = 0.0
         self._reward_details = {}
+        self._episode_diagnostics = self._new_episode_diagnostics()
 
     @property
     def steps(self):
@@ -125,9 +127,11 @@ class SimPVZEnv:
         self._last_mask = self.mask_available_actions()
         self._last_sun = self._scene.sun
         self._last_plants = self._snapshot_plants()
+        self._last_zombies = self._snapshot_zombies()
         self._last_wave_index = self._current_wave_index()
         self._last_potential = self._calculate_potential()
         self._reward_details = {}
+        self._episode_diagnostics = self._new_episode_diagnostics()
         if self._collect_render:
             self._render_data = [self._capture_frame()]
         return self._build_state()
@@ -149,12 +153,19 @@ class SimPVZEnv:
                 self._render_data.append(self._capture_frame())
             episode_over, episode_win = self._episode_status()
 
-        reward, details = self._calculate_reward(
+        reward, details, step_diagnostics = self._calculate_reward(
             action,
             action_success,
             planted_name,
             episode_over,
             episode_win,
+        )
+        self._record_step_diagnostics(
+            action,
+            action_success,
+            planted_name,
+            details,
+            step_diagnostics,
         )
         state = self._build_state()
         self._last_mask = self.mask_available_actions()
@@ -276,8 +287,17 @@ class SimPVZEnv:
     ):
         reward = 0.0
         details = {}
+        step_diagnostics = {
+            "zombies_killed": 0,
+            "plants_lost": 0,
+            "sun_diff": 0,
+        }
         current_plants = self._snapshot_plants()
+        current_zombies = self._snapshot_zombies()
         current_wave_index = self._current_wave_index()
+        damage = self._zombie_damage(current_zombies)
+        reward += damage
+        details["zombie_damage"] = damage
 
         if not action_success:
             r_invalid = float(self.rewards.get("invalid_action", -0.01))
@@ -290,61 +310,70 @@ class SimPVZEnv:
                 reward += r_wait
                 details["wait_with_sun"] = r_wait
         elif planted_name is not None:
-            r_plant = self._plant_reward(planted_name)
-            if r_plant:
-                reward += r_plant
-                details["plant"] = r_plant
+            if self.rewards.get("use_shaped", False):
+                r_plant = self._plant_reward(planted_name)
+                if r_plant:
+                    reward += r_plant
+                    details["plant"] = r_plant
 
-        r_survival = float(self.rewards.get("survival_per_step", 0.0))
-        if r_survival:
-            reward += r_survival
-            details["survival"] = r_survival
+        use_shaped = self.rewards.get("use_shaped", False)
+        if use_shaped:
+            r_survival = float(self.rewards.get("survival_per_step", 0.0))
+            if r_survival:
+                reward += r_survival
+                details["survival"] = r_survival
 
         sun_diff = self._scene.sun - self._last_sun
-        if sun_diff > 0:
+        step_diagnostics["sun_diff"] = int(sun_diff)
+        if use_shaped and sun_diff > 0:
             r_sun = sun_diff * float(self.rewards.get("sun_collect", 0.01))
             reward += r_sun
             details["sun"] = r_sun
 
         killed = list(getattr(self._scene, "killed_zombies", []))
         if killed:
-            r_kill = sum(self._zombie_kill_reward(z) for z in killed)
-            reward += r_kill
-            details["kill"] = r_kill
-            flag_kills = sum(1 for z in killed if z["name"] == "Zombie_flag")
-            if flag_kills:
-                r_wave = flag_kills * float(self.rewards.get("wave_complete", 4.0))
-                reward += r_wave
-                details["wave"] = r_wave
+            step_diagnostics["zombies_killed"] = len(killed)
+            if use_shaped:
+                r_kill = sum(self._zombie_kill_reward(z) for z in killed)
+                reward += r_kill
+                details["kill"] = r_kill
+                flag_kills = sum(1 for z in killed if z["name"] == "Zombie_flag")
+                if flag_kills:
+                    r_wave = flag_kills * float(self.rewards.get("wave_complete", 4.0))
+                    reward += r_wave
+                    details["wave"] = r_wave
 
         lost_plants = [
             plant for entity_id, plant in self._last_plants.items()
             if entity_id not in current_plants
         ]
         if lost_plants:
-            r_lost = len(lost_plants) * float(self.rewards.get("plant_lost", -0.25))
-            reward += r_lost
-            details["plant_lost"] = r_lost
-            sunflower_lost = sum(
-                1 for plant in lost_plants
-                if plant["name"] == "Sunflower"
-            )
-            if sunflower_lost:
-                r_sf = sunflower_lost * float(
-                    self.rewards.get("sunflower_lost", -0.80)
+            step_diagnostics["plants_lost"] = len(lost_plants)
+            if use_shaped:
+                r_lost = len(lost_plants) * float(self.rewards.get("plant_lost", -0.25))
+                reward += r_lost
+                details["plant_lost"] = r_lost
+                sunflower_lost = sum(
+                    1 for plant in lost_plants
+                    if plant["name"] == "Sunflower"
                 )
-                reward += r_sf
-                details["sunflower_lost"] = r_sf
+                if sunflower_lost:
+                    r_sf = sunflower_lost * float(
+                        self.rewards.get("sunflower_lost", -0.80)
+                    )
+                    reward += r_sf
+                    details["sunflower_lost"] = r_sf
 
         potential = self._calculate_potential()
-        delta = max(-5.0, min(5.0, potential - self._last_potential))
-        delta_scale = float(
-            self.rewards.get("potential", {}).get("delta_scale", 0.18)
-        )
-        r_potential = delta * delta_scale
-        if abs(r_potential) > 1e-6:
-            reward += r_potential
-            details["potential_delta"] = r_potential
+        if use_shaped:
+            delta = max(-5.0, min(5.0, potential - self._last_potential))
+            delta_scale = float(
+                self.rewards.get("potential", {}).get("delta_scale", 0.18)
+            )
+            r_potential = delta * delta_scale
+            if abs(r_potential) > 1e-6:
+                reward += r_potential
+                details["potential_delta"] = r_potential
 
         if episode_over:
             if episode_win:
@@ -358,9 +387,88 @@ class SimPVZEnv:
 
         self._last_sun = self._scene.sun
         self._last_plants = current_plants
+        self._last_zombies = current_zombies
         self._last_wave_index = current_wave_index
         self._last_potential = potential
-        return reward, details
+        return reward, details, step_diagnostics
+
+    def _zombie_damage(self, current_zombies):
+        damage = 0.0
+        current_ids = set(current_zombies)
+        for entity_id, zombie in current_zombies.items():
+            previous = self._last_zombies.get(entity_id)
+            if previous is not None:
+                damage += max(0.0, float(previous["hp"]) - float(zombie["hp"]))
+        for entity_id, zombie in self._last_zombies.items():
+            if entity_id not in current_ids:
+                damage += max(0.0, float(zombie["hp"]))
+        return damage
+
+    def _new_episode_diagnostics(self):
+        return {
+            "action_stats": {
+                "wait": 0,
+                "plant": 0,
+                "shovel": 0,
+                "invalid": 0,
+                "plant_success_by_type": {},
+            },
+            "reward_breakdown": {},
+            "zombies_killed": 0,
+            "plants_lost": 0,
+            "sun_stats": {
+                "final_sun": int(getattr(self, "_scene", None).sun) if hasattr(self, "_scene") else 0,
+                "max_sun": int(getattr(self, "_scene", None).sun) if hasattr(self, "_scene") else 0,
+                "sun_gained": 0,
+                "sun_spent": 0,
+                "wait_with_high_sun": 0,
+                "_sun_total": 0.0,
+                "_sun_samples": 0,
+            },
+        }
+
+    def _record_step_diagnostics(
+        self,
+        action,
+        action_success,
+        planted_name,
+        reward_details,
+        step_diagnostics,
+    ):
+        diagnostics = self._episode_diagnostics
+        action_stats = diagnostics["action_stats"]
+        if action == self.wait_action:
+            action_stats["wait"] += 1
+            threshold = self.rewards.get("wait_sun_threshold", 300)
+            if self._last_sun >= threshold:
+                diagnostics["sun_stats"]["wait_with_high_sun"] += 1
+        elif not action_success:
+            action_stats["invalid"] += 1
+        elif planted_name is not None:
+            action_stats["plant"] += 1
+            by_type = action_stats["plant_success_by_type"]
+            by_type[planted_name] = int(by_type.get(planted_name, 0)) + 1
+
+        for key, value in reward_details.items():
+            diagnostics["reward_breakdown"][key] = (
+                float(diagnostics["reward_breakdown"].get(key, 0.0))
+                + float(value)
+            )
+
+        diagnostics["zombies_killed"] += int(step_diagnostics.get("zombies_killed", 0))
+        diagnostics["plants_lost"] += int(step_diagnostics.get("plants_lost", 0))
+
+        sun_stats = diagnostics["sun_stats"]
+        sun_diff = int(step_diagnostics.get("sun_diff", 0))
+        if sun_diff > 0:
+            sun_stats["sun_gained"] += sun_diff
+        elif sun_diff < 0:
+            sun_stats["sun_spent"] += abs(sun_diff)
+        current_sun = int(self._scene.sun)
+        sun_stats["final_sun"] = current_sun
+        sun_stats["max_sun"] = max(int(sun_stats["max_sun"]), current_sun)
+        sun_stats["_sun_total"] += current_sun
+        sun_stats["_sun_samples"] += 1
 
     def _plant_reward(self, plant_name):
         plant_cls = self.plant_deck.get(plant_name)
@@ -545,6 +653,29 @@ class SimPVZEnv:
             "sun": self._scene.sun,
             "lives": self._scene.lives,
             "reward_details": dict(reward_details),
+            "diagnostics": self._episode_diagnostics_snapshot(),
+        }
+
+    def _episode_diagnostics_snapshot(self):
+        diagnostics = self._episode_diagnostics
+        sun_stats = dict(diagnostics["sun_stats"])
+        samples = int(sun_stats.pop("_sun_samples", 0))
+        total = float(sun_stats.pop("_sun_total", 0.0))
+        sun_stats["mean_sun"] = total / samples if samples else 0.0
+        return {
+            "action_stats": {
+                "wait": int(diagnostics["action_stats"]["wait"]),
+                "plant": int(diagnostics["action_stats"]["plant"]),
+                "shovel": int(diagnostics["action_stats"]["shovel"]),
+                "invalid": int(diagnostics["action_stats"]["invalid"]),
+                "plant_success_by_type": dict(
+                    diagnostics["action_stats"]["plant_success_by_type"]
+                ),
+            },
+            "reward_breakdown": dict(diagnostics["reward_breakdown"]),
+            "zombies_killed": int(diagnostics["zombies_killed"]),
+            "plants_lost": int(diagnostics["plants_lost"]),
+            "sun_stats": sun_stats,
         }
 
     def _capture_frame(self):

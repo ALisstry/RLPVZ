@@ -1,7 +1,7 @@
 from .plant import Plant
 
 WALLNUT_COST = 50
-WALLNUT_COOLDOWN = 20
+WALLNUT_COOLDOWN = 30
 WALLNUT_MAX_HP = 4000
 
 
