@@ -5,6 +5,7 @@ from collections import namedtuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ReplayBuffer:
@@ -109,8 +110,23 @@ def transform_observation(observation):
 
 _mse_loss = nn.MSELoss()
 
+# Return type for calculate_loss: loss scalar + diagnostics
+LossResult = namedtuple("LossResult", ["loss", "diagnostics"])
+
 
 def calculate_loss(network, target_network, batch, gamma):
+    """Double-DQN loss with training diagnostics.
+
+    Returns a :class:`LossResult` containing the scalar MSE loss and a
+    ``diagnostics`` dict with the following keys (all Python floats):
+
+    * ``advantage`` — Q(s,a) − mean(Q(s,·))  (how much better the chosen
+      action is vs the mean)
+    * ``entropy`` — −Σ softmax(Q) · log_softmax(Q)  (policy spread)
+    * ``mean_q`` — mean Q-value over the batch
+    * ``max_q`` — mean of per-sample max Q-values
+    * ``td_error`` — mean |Q(s,a) − target|
+    """
     states, actions, rewards, dones, next_states, masks, next_masks = [
         item for item in batch
     ]
@@ -118,8 +134,24 @@ def calculate_loss(network, target_network, batch, gamma):
     actions_t = torch.LongTensor(np.array(actions)).reshape(-1, 1).to(device=network.device)
     dones_t = torch.BoolTensor(dones).to(device=network.device)
 
-    qvals = torch.gather(network.get_qvals(states), 1, actions_t)
+    # ── Current Q-values ─────────────────────────────────────────────
+    all_qvals = network.get_qvals(states)                 # (B, n_actions)
+    qvals = torch.gather(all_qvals, 1, actions_t)         # (B, 1)
 
+    # ── Diagnostics (detached) ───────────────────────────────────────
+    with torch.no_grad():
+        mean_q = float(qvals.mean().cpu().item())
+        max_q = float(all_qvals.max(dim=1).values.mean().cpu().item())
+
+        probs = F.softmax(all_qvals, dim=1)               # (B, n_actions)
+        log_probs = torch.log(probs + 1e-12)
+        entropy = float(-(probs * log_probs).sum(dim=1).mean().cpu().item())
+
+        advantage = float(
+            (qvals - all_qvals.mean(dim=1, keepdim=True)).mean().cpu().item()
+        )
+
+    # ── Double-DQN target ────────────────────────────────────────────
     next_masks = np.array(next_masks, dtype=bool)
     with torch.no_grad():
         qvals_next_pred = network.get_qvals(next_states)
@@ -134,4 +166,20 @@ def calculate_loss(network, target_network, batch, gamma):
         qvals_next = torch.gather(target_qvals, 1, next_actions_t)
     qvals_next[dones_t] = 0
     expected_qvals = gamma * qvals_next + rewards_t
-    return _mse_loss(qvals, expected_qvals)
+
+    # ── TD error (detached) ──────────────────────────────────────────
+    with torch.no_grad():
+        td_error = float((expected_qvals - qvals).abs().mean().cpu().item())
+
+    diagnostics = {
+        "advantage": advantage,
+        "entropy": entropy,
+        "mean_q": mean_q,
+        "max_q": max_q,
+        "td_error": td_error,
+    }
+
+    return LossResult(
+        loss=_mse_loss(qvals, expected_qvals),
+        diagnostics=diagnostics,
+    )

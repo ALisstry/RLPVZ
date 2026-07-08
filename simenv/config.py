@@ -78,7 +78,7 @@ REWARDS = {
 from simenv.consts import Plants
 
 CURRICULUM = {
-    "enabled": True,
+    "enabled": False,
     "strategy": "stage_gate",
     "default_burn_in": None,
     "default_stage_epsilon": {

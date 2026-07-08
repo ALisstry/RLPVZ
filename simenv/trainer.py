@@ -17,7 +17,7 @@ from simenv.config import CURRICULUM
 from simenv.curriculum import build_curriculum
 from simenv.pvz_sim import config
 from simenv.model import (
-    ReplayBuffer, DDQNNetwork, transform_observation, calculate_loss,
+    ReplayBuffer, DDQNNetwork, transform_observation, calculate_loss, LossResult,
 )
 from training.evaluation import (
     BestEvaluationCheckpoint,
@@ -147,6 +147,20 @@ def train_sim(
     training_loss = []
     training_iterations = []
     update_loss = []
+    # Per-step diagnostic accumulators (averaged per episode)
+    update_advantage = []
+    update_entropy = []
+    update_mean_q = []
+    update_max_q = []
+    update_td_error = []
+    update_grad_norm = []
+    # Per-episode averaged metrics
+    training_advantage = []
+    training_entropy = []
+    training_mean_q = []
+    training_max_q = []
+    training_td_error = []
+    training_grad_norm = []
     step_count = 0
     window = 100
     last_eval_episode = None
@@ -168,12 +182,18 @@ def train_sim(
                 training_rewards,
                 training_iterations,
                 training_loss,
+                training_advantage=training_advantage,
+                training_entropy=training_entropy,
+                training_mean_q=training_mean_q,
+                training_max_q=training_max_q,
+                training_td_error=training_td_error,
+                training_grad_norm=training_grad_norm,
                 plot_callback=plot_callback,
             )
 
     signal.signal(signal.SIGINT, _handle_interrupt)
 
-    s_0, step_count, stopped = _burn_in_stage(
+    s_0, mask, step_count, stopped = _burn_in_stage(
         env,
         buffer,
         step_count=step_count,
@@ -197,23 +217,35 @@ def train_sim(
                 epsilon = curriculum.epsilon()
             else:
                 epsilon = threshold.epsilon(ep)
-            mask = np.array(env.mask_available_actions())
             action = network.decide_action(s_0, mask, epsilon=epsilon)
             s_1, r, done, info = env.step(action)
             s_1 = transform_observation(s_1)
             next_mask = info.get("mask", env.mask_available_actions())
             rewards += r
             buffer.append(s_0, action, r, done, s_1, mask, next_mask)
-            s_0 = s_1.copy()
+            s_0 = s_1               # transform_observation already copied
+            mask = next_mask         # carry forward to next step
             step_count += 1
 
             if step_count % network_update_freq == 0:
                 network.optimizer.zero_grad(set_to_none=True)
                 batch = buffer.sample_batch(batch_size=batch_size)
-                loss = calculate_loss(network, target_network, batch, gamma)
-                loss.backward()
+                result = calculate_loss(network, target_network, batch, gamma)
+                result.loss.backward()
+                # ── Gradient norm (before optimizer step) ──
+                total_norm = 0.0
+                for p in network.parameters():
+                    if p.grad is not None:
+                        total_norm += p.grad.data.norm(2).item() ** 2
+                grad_norm = total_norm ** 0.5
                 network.optimizer.step()
-                update_loss.append(loss.detach().item())
+                update_loss.append(result.loss.detach().item())
+                update_advantage.append(result.diagnostics["advantage"])
+                update_entropy.append(result.diagnostics["entropy"])
+                update_mean_q.append(result.diagnostics["mean_q"])
+                update_max_q.append(result.diagnostics["max_q"])
+                update_td_error.append(result.diagnostics["td_error"])
+                update_grad_norm.append(grad_norm)
 
             if step_count % network_sync_freq == 0:
                 target_network.load_state_dict(network.state_dict())
@@ -224,7 +256,19 @@ def train_sim(
                 training_iterations.append(float(info.get("steps", env._scene._chrono)))
                 if update_loss:
                     training_loss.append(np.mean(update_loss))
+                    training_advantage.append(np.mean(update_advantage))
+                    training_entropy.append(np.mean(update_entropy))
+                    training_mean_q.append(np.mean(update_mean_q))
+                    training_max_q.append(np.mean(update_max_q))
+                    training_td_error.append(np.mean(update_td_error))
+                    training_grad_norm.append(np.mean(update_grad_norm))
                 update_loss = []
+                update_advantage = []
+                update_entropy = []
+                update_mean_q = []
+                update_max_q = []
+                update_td_error = []
+                update_grad_norm = []
 
                 old_stage = curriculum.current_stage_name
                 curriculum.record_episode()
@@ -277,11 +321,18 @@ def train_sim(
                     mean_r = np.mean(training_rewards[-window:])
                     mean_i = np.mean(training_iterations[-window:])
                     mean_l = np.mean(training_loss[-window:]) if training_loss else 0
+                    mean_adv = np.mean(training_advantage[-window:]) if training_advantage else 0
+                    mean_ent = np.mean(training_entropy[-window:]) if training_entropy else 0
+                    mean_q = np.mean(training_mean_q[-window:]) if training_mean_q else 0
+                    mean_td = np.mean(training_td_error[-window:]) if training_td_error else 0
+                    mean_gn = np.mean(training_grad_norm[-window:]) if training_grad_norm else 0
                     print(f"Episode {ep:5d}/{max_episodes}  "
                           f"Stage {curriculum.current_stage_name}  "
                           f"stage_episode={curriculum.stage_episode}  "
                           f"Steps {step_count:7d}  "
-                          f"Mean R {mean_r:8.2f}  Mean I {mean_i:.2f}  Mean L {mean_l:.2f}")
+                          f"Mean R {mean_r:8.2f}  Mean I {mean_i:.2f}  Mean L {mean_l:.2f}  "
+                          f"Adv {mean_adv:+.3f}  Ent {mean_ent:.3f}  "
+                          f"Qmean {mean_q:+.2f}  |TD| {mean_td:.3f}  |grad| {mean_gn:.3f}")
 
                 if plot_freq and ep % plot_freq == 0:
                     _save_training_artifacts(
@@ -289,6 +340,12 @@ def train_sim(
                         training_rewards,
                         training_iterations,
                         training_loss,
+                        training_advantage=training_advantage,
+                        training_entropy=training_entropy,
+                        training_mean_q=training_mean_q,
+                        training_max_q=training_max_q,
+                        training_td_error=training_td_error,
+                        training_grad_norm=training_grad_norm,
                         plot_callback=plot_callback,
                     )
 
@@ -304,7 +361,7 @@ def train_sim(
                         memory_size=buffer_size,
                         burn_in=stage_burn_in,
                     )
-                    s_0, step_count, stopped = _burn_in_stage(
+                    s_0, mask, step_count, stopped = _burn_in_stage(
                         env,
                         buffer,
                         step_count=step_count,
@@ -315,6 +372,7 @@ def train_sim(
                         break
                 else:
                     s_0 = transform_observation(env.reset())
+                    mask = np.array(env.mask_available_actions())
 
     if stop_requested:
         print(f"Training stopped at episode {ep}, step {step_count}.")
@@ -327,6 +385,12 @@ def train_sim(
         training_rewards,
         training_iterations,
         training_loss,
+        training_advantage=training_advantage,
+        training_entropy=training_entropy,
+        training_mean_q=training_mean_q,
+        training_max_q=training_max_q,
+        training_td_error=training_td_error,
+        training_grad_norm=training_grad_norm,
         plot_callback=plot_callback,
     )
     print("Training complete.")
@@ -351,6 +415,12 @@ def train_sim(
             training_rewards,
             training_iterations,
             training_loss,
+            training_advantage=training_advantage,
+            training_entropy=training_entropy,
+            training_mean_q=training_mean_q,
+            training_max_q=training_max_q,
+            training_td_error=training_td_error,
+            training_grad_norm=training_grad_norm,
             plot_callback=plot_callback,
         )
 
@@ -535,8 +605,8 @@ def _jsonable(value):
 def _burn_in_stage(env, buffer, *, step_count, stage_name, stop_requested):
     print(f"Burn-in ({buffer.burn_in} steps, stage={stage_name})...")
     state = transform_observation(env.reset())
+    mask = np.array(env.mask_available_actions())  # initial mask
     while buffer.burn_in_capacity() < 1 and not stop_requested():
-        mask = np.array(env.mask_available_actions())
         if np.random.random() < 0.5:
             action = env.wait_action
         else:
@@ -545,13 +615,15 @@ def _burn_in_stage(env, buffer, *, step_count, stage_name, stop_requested):
         next_state = transform_observation(next_state)
         next_mask = info.get("mask", env.mask_available_actions())
         buffer.append(state, action, reward, done, next_state, mask, next_mask)
-        state = next_state.copy()
+        state = next_state  # transform_observation already copied
+        mask = next_mask      # carry forward to next iteration
         if done:
             state = transform_observation(env.reset())
+            mask = np.array(env.mask_available_actions())  # fresh mask after reset
         step_count += 1
     print(f"Burn-in done. Buffer: {len(buffer)}  "
           f"(steps so far: {step_count})")
-    return state, step_count, bool(stop_requested())
+    return state, mask, step_count, bool(stop_requested())
 
 
 def _stage_burn_in(stage, fallback):
@@ -615,6 +687,12 @@ def _save_training_checkpoint(
     training_rewards,
     training_iterations,
     training_loss,
+    training_advantage=None,
+    training_entropy=None,
+    training_mean_q=None,
+    training_max_q=None,
+    training_td_error=None,
+    training_grad_norm=None,
     plot_callback=None,
 ):
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -625,6 +703,12 @@ def _save_training_checkpoint(
         training_rewards,
         training_iterations,
         training_loss,
+        training_advantage=training_advantage,
+        training_entropy=training_entropy,
+        training_mean_q=training_mean_q,
+        training_max_q=training_max_q,
+        training_td_error=training_td_error,
+        training_grad_norm=training_grad_norm,
         plot_callback=plot_callback,
     )
 
@@ -634,6 +718,12 @@ def _save_training_artifacts(
     training_rewards,
     training_iterations,
     training_loss,
+    training_advantage=None,
+    training_entropy=None,
+    training_mean_q=None,
+    training_max_q=None,
+    training_td_error=None,
+    training_grad_norm=None,
     plot_callback=None,
 ):
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -643,8 +733,30 @@ def _save_training_artifacts(
     np.save(save_path.replace(".pt", "_rewards.npy"), rewards)
     np.save(save_path.replace(".pt", "_iterations.npy"), iterations)
     np.save(save_path.replace(".pt", "_loss.npy"), loss)
+    for name, data in [
+        ("advantage", training_advantage),
+        ("entropy", training_entropy),
+        ("mean_q", training_mean_q),
+        ("max_q", training_max_q),
+        ("td_error", training_td_error),
+        ("grad_norm", training_grad_norm),
+    ]:
+        if data is not None and len(data) > 0:
+            np.save(
+                save_path.replace(".pt", f"_{name}.npy"),
+                np.array(data),
+            )
     if plot_callback is not None:
-        plot_callback(save_path, rewards, iterations, loss)
+        plot_callback(
+            save_path,
+            rewards, iterations, loss,
+            advantage=np.array(training_advantage) if training_advantage else None,
+            entropy=np.array(training_entropy) if training_entropy else None,
+            mean_q=np.array(training_mean_q) if training_mean_q else None,
+            max_q=np.array(training_max_q) if training_max_q else None,
+            td_error=np.array(training_td_error) if training_td_error else None,
+            grad_norm=np.array(training_grad_norm) if training_grad_norm else None,
+        )
 
 
 def _default_save_path(algo, filename):
