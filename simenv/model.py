@@ -108,7 +108,7 @@ def transform_observation(observation):
     return observation.astype(np.float32)
 
 
-_mse_loss = nn.MSELoss()
+_loss_fn = nn.SmoothL1Loss(beta=1.0)
 
 # Return type for calculate_loss: loss scalar + diagnostics
 LossResult = namedtuple("LossResult", ["loss", "diagnostics"])
@@ -117,7 +117,7 @@ LossResult = namedtuple("LossResult", ["loss", "diagnostics"])
 def calculate_loss(network, target_network, batch, gamma):
     """Double-DQN loss with training diagnostics.
 
-    Returns a :class:`LossResult` containing the scalar MSE loss and a
+    Returns a :class:`LossResult` containing the scalar Huber loss and a
     ``diagnostics`` dict with the following keys (all Python floats):
 
     * ``advantage`` — Q(s,a) − mean(Q(s,·))  (how much better the chosen
@@ -180,6 +180,6 @@ def calculate_loss(network, target_network, batch, gamma):
     }
 
     return LossResult(
-        loss=_mse_loss(qvals, expected_qvals),
+        loss=_loss_fn(qvals, expected_qvals),
         diagnostics=diagnostics,
     )

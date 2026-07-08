@@ -10,6 +10,7 @@ import subprocess
 from datetime import datetime
 import numpy as np
 import torch
+import torch.nn as nn
 from copy import deepcopy
 
 from simenv import SimPVZEnv
@@ -59,6 +60,7 @@ def train_sim(
     save_path=None,
     eval_episodes=100,
     eval_freq_episodes=2500,
+    max_grad_norm=0.5,
     visualize=False,
     plot_freq=100,
     plot_callback=None,
@@ -111,6 +113,7 @@ def train_sim(
         batch_size=batch_size,
         gamma=gamma,
         lr=lr,
+        max_grad_norm=max_grad_norm,
         network_update_freq=network_update_freq,
         network_sync_freq=network_sync_freq,
         eval_episodes=eval_episodes,
@@ -137,6 +140,7 @@ def train_sim(
         batch_size=batch_size,
         gamma=gamma,
         lr=lr,
+        max_grad_norm=max_grad_norm,
         network_update_freq=network_update_freq,
         network_sync_freq=network_sync_freq,
         eval_config=eval_config,
@@ -238,6 +242,7 @@ def train_sim(
                     if p.grad is not None:
                         total_norm += p.grad.data.norm(2).item() ** 2
                 grad_norm = total_norm ** 0.5
+                nn.utils.clip_grad_norm_(network.parameters(), max_grad_norm)
                 network.optimizer.step()
                 update_loss.append(result.loss.detach().item())
                 update_advantage.append(result.diagnostics["advantage"])
@@ -444,6 +449,7 @@ def _print_config(**cfg):
     print(f"  {'Batch size:':24s} {cfg['batch_size']}")
     print(f"  {'Gamma:':24s} {cfg['gamma']}")
     print(f"  {'Learning rate:':24s} {cfg['lr']}")
+    print(f"  {'Max grad norm:':24s} {cfg['max_grad_norm']}")
     print(f"  {'Network update freq:':24s} {cfg['network_update_freq']} steps")
     print(f"  {'Network sync freq:':24s} {cfg['network_sync_freq']} steps")
     print(f"  {'Epsilon decay:':24s} {cfg['epsilon_decay']}")
@@ -474,6 +480,7 @@ def _save_run_metadata(
     batch_size,
     gamma,
     lr,
+    max_grad_norm,
     network_update_freq,
     network_sync_freq,
     eval_config,
@@ -511,6 +518,7 @@ def _save_run_metadata(
             "batch_size": int(batch_size),
             "gamma": float(gamma),
             "lr": float(lr),
+            "max_grad_norm": float(max_grad_norm),
             "network_update_freq": int(network_update_freq),
             "network_sync_freq": int(network_sync_freq),
         },
