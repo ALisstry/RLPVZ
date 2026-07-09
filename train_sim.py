@@ -297,6 +297,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train DDQN agent on SimPVZ")
     parser.add_argument(
+        "--use_factored",
+        action="store_true",
+        default=False,
+        help="Use 3-Factor Q-Network: Q(card,row,col) = q_card + q_row + q_col",
+    )
+    parser.add_argument(
         "--use_differential",
         action="store_true",
         default=False,
@@ -315,5 +321,6 @@ if __name__ == "__main__":
         network_sync_freq=2000,
         eval_episodes=100,
         plot_callback=plot_training,
+        use_factored=args.use_factored,
         use_differential=args.use_differential,
     )

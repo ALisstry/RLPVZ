@@ -104,6 +104,81 @@ class DDQNNetwork(nn.Module):
         return self.network(state_t)
 
 
+class FactoredDDQNNetwork(DDQNNetwork):
+    """3-Factor Q-Network: Q(card,row,col) = q_card + q_row + q_col + q_wait.
+
+    Decomposes the 451-action space into independent factors:
+        q_card ∈ R^{10}   — card-type preference
+        q_row  ∈ R^{5}    — row preference
+        q_col  ∈ R^{9}    — column preference
+        q_wait ∈ R^{1}    — "do nothing" value
+
+    Full Q-values are rebuilt by explicitly enumerating all
+    10 × 5 × 9 = 450 plant-action combinations at query time.
+    Output: 10 + 5 + 9 + 1 = 25 dims (vs 451, ~18× compression).
+    """
+
+    def __init__(self, env, learning_rate=1e-3, device="cpu",
+                 hidden_sizes=None):
+        super().__init__(env, learning_rate=learning_rate, device=device,
+                         hidden_sizes=hidden_sizes)
+        if hidden_sizes is None:
+            hidden_sizes = [2048, 2048]
+
+        # ── Rebuild trunk (all hidden layers) ──
+        trunk_layers = []
+        prev = self.n_inputs
+        for h in hidden_sizes:
+            trunk_layers.append(nn.Linear(prev, h, bias=True))
+            trunk_layers.append(nn.LeakyReLU())
+            prev = h
+        self.trunk = nn.Sequential(*trunk_layers) if trunk_layers else nn.Identity()
+        trunk_out = prev if hidden_sizes else self.n_inputs
+
+        # ── Factored heads (direct Linear — free-range Q values) ──
+        self.head_card = nn.Linear(trunk_out, self.num_cards, bias=True)  # 10
+        self.head_row  = nn.Linear(trunk_out, self.rows, bias=True)       #  5
+        self.head_col  = nn.Linear(trunk_out, self.cols, bias=True)       #  9
+        self.head_wait = nn.Linear(trunk_out, 1, bias=True)               #  1
+
+        self.network = None
+
+        if self.device == "cuda":
+            self.to("cuda")
+
+        self.optimizer = torch.optim.Adam(
+            filter(lambda p: p.requires_grad, self.parameters()),
+            lr=self.learning_rate,
+        )
+
+    def get_qvals(self, state):
+        if isinstance(state, (list, tuple)):
+            state = np.array(state)
+        state_t = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        single = state_t.dim() == 1
+        if single:
+            state_t = state_t.unsqueeze(0)
+
+        feat = self.trunk(state_t)
+        q_card = self.head_card(feat)   # (B, 10)
+        q_row  = self.head_row(feat)    # (B,  5)
+        q_col  = self.head_col(feat)    # (B,  9)
+        q_wait = self.head_wait(feat)   # (B,  1)
+
+        # Explicit enumeration: Q(card_i, row_j, col_k) = q_card[i] + q_row[j] + q_col[k]
+        # Broadcasting: (B,10,1,1) + (B,1,5,1) + (B,1,1,9) = (B,10,5,9)
+        q_plant = (
+              q_card.unsqueeze(-1).unsqueeze(-1)
+            + q_row.unsqueeze(1).unsqueeze(-1)
+            + q_col.unsqueeze(1).unsqueeze(1)
+        ).reshape(state_t.shape[0], -1)                    # (B, 450)
+
+        qvals = torch.cat([q_plant, q_wait], dim=-1)      # (B, 451)
+        if single:
+            qvals = qvals.squeeze(0)
+        return qvals
+
+
 class DifferentialDDQNNetwork(DDQNNetwork):
     """Differential Q-Network: Q(s,a) = Q(s,wait) + Δ(s,a),  Δ(s,wait) ≡ 0.
 

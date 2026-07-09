@@ -18,7 +18,7 @@ from simenv.config import CURRICULUM
 from simenv.curriculum import build_curriculum
 from simenv.pvz_sim import config
 from simenv.model import (
-    ReplayBuffer, DDQNNetwork, DifferentialDDQNNetwork,
+    ReplayBuffer, DDQNNetwork, DifferentialDDQNNetwork, FactoredDDQNNetwork,
     transform_observation, calculate_loss, LossResult,
 )
 from training.evaluation import (
@@ -66,6 +66,7 @@ def train_sim(
     plot_freq=100,
     plot_callback=None,
     use_differential=False,
+    use_factored=False,
 ):
     if save_path is None:
         save_path = _default_save_path("ddqn", "sim_ddqn.pt")
@@ -96,7 +97,12 @@ def train_sim(
     )
     if getattr(curriculum, "enabled", True):
         env.apply_stage(curriculum.current_stage)
-    NetworkCls = DifferentialDDQNNetwork if use_differential else DDQNNetwork
+    if use_factored:
+        NetworkCls = FactoredDDQNNetwork
+    elif use_differential:
+        NetworkCls = DifferentialDDQNNetwork
+    else:
+        NetworkCls = DDQNNetwork
     network = NetworkCls(env, learning_rate=lr, device=device)
     target_network = deepcopy(network)
     buffer = ReplayBuffer(memory_size=buffer_size, burn_in=burn_in)
@@ -108,7 +114,11 @@ def train_sim(
 
     _print_config(
         device=device,
-        network_type="ddqn_differential" if use_differential else "ddqn",
+        network_type=(
+            "ddqn_factored" if use_factored
+            else "ddqn_differential" if use_differential
+            else "ddqn"
+        ),
         network_params=sum(p.numel() for p in network.parameters()),
         max_episodes=max_episodes,
         buffer_size=buffer_size,
