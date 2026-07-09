@@ -312,7 +312,7 @@ if __name__ == "__main__":
 
     from simenv.trainer import train_sim
     train_sim(
-        max_episodes=200000,
+        max_episodes=100000,
         buffer_size=100000,
         burn_in=10000,
         batch_size=512,
