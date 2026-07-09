@@ -93,20 +93,25 @@ def _random_worker_run(
                 if valid_actions:
                     action = random.choice(valid_actions)
                 else:
-                    # mask 全为零时的安全兜底：使用 wait 动作（最后一个动作）
-                    action = len(mask) - 1
+                    # mask 全为零时的安全兜底（正常不应发生，wait 始终可用）
+                    action = len(mask) - 1 if len(mask) > 0 else 0
+                    import numpy as _np
+                    _mask_arr = _np.asarray(mask)
+                    print(
+                        f"[Benchmark][Random][W{worker_id}] WARNING: "
+                        f"truly empty action mask at episode "
+                        f"{start_index + i + 1} step {actions} | "
+                        f"mask_len={len(mask)} mask_sum={_mask_arr.sum()} "
+                        f"mask_dtype={type(mask).__name__} "
+                        f"fallback_action={action}",
+                        flush=True,
+                    )
                 if action == _wait_idx:
                     _has_nonwait = any(mask[:-1]) if len(mask) > 1 else False
                     if _has_nonwait:
                         _wait_choice += 1
                     else:
                         _wait_forced += 1
-                    print(
-                        f"[Benchmark][Random][W{worker_id}] WARNING: "
-                        f"empty action mask at episode {start_index + i + 1} "
-                        f"step {actions}, falling back to wait action={action}",
-                        flush=True,
-                    )
                 _t0 = __import__("time").time()
                 state, reward, done, info = env.step(action)
                 _dt = __import__("time").time() - _t0
