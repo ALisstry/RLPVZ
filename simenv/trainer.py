@@ -75,7 +75,11 @@ def train_sim(
     per_epsilon=1e-6,
 ):
     if save_path is None:
-        save_path = _default_save_path("ddqn", "sim_ddqn.pt")
+        config_tag = _build_config_tag(
+            use_factored=use_factored, use_differential=use_differential,
+            use_per=use_per, hidden_sizes=hidden_sizes,
+        )
+        save_path = _default_save_path("ddqn", "sim_ddqn.pt", tag=config_tag)
     output_dir = os.path.dirname(save_path) or "."
     eval_config = EvaluationConfig(
         enabled=eval_freq_episodes > 0 and eval_episodes > 0,
@@ -839,9 +843,25 @@ def _save_training_artifacts(
         )
 
 
-def _default_save_path(algo, filename):
+def _build_config_tag(use_factored=False, use_differential=False,
+                      use_per=False, hidden_sizes=None):
+    """Build a short directory tag from config options for run identification."""
+    parts = []
+    hs = hidden_sizes or [2048, 2048]
+    parts.append("h" + "-".join(str(h) for h in hs))
+    if use_factored:
+        parts.append("fact")
+    elif use_differential:
+        parts.append("diff")
+    if use_per:
+        parts.append("per")
+    return "_".join(parts)
+
+
+def _default_save_path(algo, filename, tag=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join("saved", algo, timestamp, filename)
+    folder = timestamp if tag is None else f"{timestamp}_{tag}"
+    return os.path.join("saved", algo, folder, filename)
 
 
 def _run_and_save_eval(
