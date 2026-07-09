@@ -121,7 +121,9 @@ def plot_training(save_path, rewards, iterations, loss,
         ax.set_xlim(0, max(len(data), 1))
         ax.grid(True, alpha=0.3)
 
-    # ── Row 0 ──────────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════
+    # Row 0 — Episode-level metrics (x-axis: Episode)
+    # ═══════════════════════════════════════════════════════════════════
     _plot_metric(axes[0, 0], rewards, "Episode Reward",
                  "Episode", "Reward", color="tab:blue")
     if eval_episodes:
@@ -130,11 +132,69 @@ def plot_training(save_path, rewards, iterations, loss,
                            label="Eval", edgecolors="black", linewidths=0.3)
         axes[0, 0].legend(fontsize=7, loc="best")
 
-    _plot_metric(axes[0, 1], loss, "Training Loss (Huber)",
+    _plot_metric(axes[0, 1], iterations, "Episode Iterations (Survival)",
+                 "Episode", "Frames", color="tab:blue")
+    if eval_episodes:
+        axes[0, 1].scatter(eval_episodes, eval_survivals,
+                           color="red", marker="s", s=30, zorder=5,
+                           label="Eval", edgecolors="black", linewidths=0.3)
+        axes[0, 1].legend(fontsize=7, loc="best")
+    if iterations is not None and len(iterations) > 0:
+        axes[0, 1].axhline(y=max(iterations), color="gray",
+                           linestyle=":", linewidth=1, alpha=0.5)
+
+    # Eval Score History
+    ax_er = axes[0, 2]
+    if eval_episodes:
+        ax_er.plot(eval_episodes, eval_rewards,
+                   color="tab:red", marker="o", markersize=5, linewidth=1.3)
+    else:
+        ax_er.text(0.5, 0.5, "No eval yet", transform=ax_er.transAxes,
+                   ha="center", va="center", fontsize=10, color="gray")
+    ax_er.set_title("Eval Reward History", fontsize=11, fontweight="bold")
+    ax_er.set_xlabel("Episode")
+    ax_er.set_ylabel("Eval Reward")
+    ax_er.tick_params(labelsize=8)
+    ax_er.grid(True, alpha=0.3)
+
+    # Eval Survival History
+    ax_es = axes[0, 3]
+    if eval_episodes:
+        ax_es.plot(eval_episodes, eval_survivals,
+                   color="tab:blue", marker="s", markersize=4, linewidth=1.3)
+    else:
+        ax_es.text(0.5, 0.5, "No eval yet", transform=ax_es.transAxes,
+                   ha="center", va="center", fontsize=10, color="gray")
+    ax_es.set_title("Eval Survival History", fontsize=11, fontweight="bold")
+    ax_es.set_xlabel("Episode")
+    ax_es.set_ylabel("Survival (frames)")
+    ax_es.tick_params(labelsize=8)
+    ax_es.grid(True, alpha=0.3)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Row 1 — Loss & Value diagnostics (x-axis: Update Step)
+    # ═══════════════════════════════════════════════════════════════════
+    _plot_metric(axes[1, 0], loss, "Training Loss (Huber)",
                  "Update Step", "Loss", color="tab:red", ma_win=step_window)
 
+    # Loss (Log Scale)
+    ax_logl = axes[1, 1]
+    if loss is not None and len(loss) > 0:
+        sx, sy = _rolling_mean(loss, step_window)
+        ax_logl.semilogy(sx, sy + 1e-10, color="tab:red", linewidth=1.8,
+                         label=f"Loss (log, MA{step_window})")
+        ax_logl.legend(fontsize=7, loc="best")
+    else:
+        ax_logl.text(0.5, 0.5, "No data yet", transform=ax_logl.transAxes,
+                     ha="center", va="center", fontsize=10, color="gray")
+    ax_logl.set_title("Loss (Log Scale)", fontsize=11, fontweight="bold")
+    ax_logl.set_xlabel("Update Step")
+    ax_logl.set_ylabel("Loss")
+    ax_logl.tick_params(labelsize=8)
+    ax_logl.grid(True, alpha=0.3, which="both")
+
     # Q-Value & Differential Statistics
-    ax_q = axes[0, 2]
+    ax_q = axes[1, 2]
     has_q = False
     if mean_q is not None and len(mean_q) > 0:
         sx, sy = _rolling_mean(mean_q, step_window)
@@ -165,7 +225,6 @@ def plot_training(save_path, rewards, iterations, loss,
     if not has_q:
         ax_q.text(0.5, 0.5, "No data yet", transform=ax_q.transAxes,
                   ha="center", va="center", fontsize=10, color="gray")
-    # Diagnostic gap annotation
     if all(v is not None and len(v) > 0 for v in (mean_q, q_wait)):
         gap = mean_q[-1] - q_wait[-1]
         ax_q.text(0.98, 0.02, f"gap(MeanQ-Qwait)={gap:+.4f}",
@@ -179,83 +238,29 @@ def plot_training(save_path, rewards, iterations, loss,
     ax_q.legend(fontsize=6, loc="best")
     ax_q.grid(True, alpha=0.3)
 
-    _plot_metric(axes[0, 3], td_error, "|TD Error|",
+    _plot_metric(axes[1, 3], td_error, "|TD Error|",
                  "Update Step", "|TD Error|", color="tab:purple", ma_win=step_window)
 
-    # ── Row 1 ──────────────────────────────────────────────────────────
-    _plot_metric(axes[1, 0], advantage, "Mean Advantage  A(s,a)",
+    # ═══════════════════════════════════════════════════════════════════
+    # Row 2 — Policy diagnostics & dynamics (x-axis: Update Step)
+    # ═══════════════════════════════════════════════════════════════════
+    _plot_metric(axes[2, 0], advantage, "Mean Advantage  A(s,a)",
                  "Update Step", "Advantage", color="tab:green", ma_win=step_window)
-    axes[1, 0].axhline(y=0, color="gray", linestyle="--",
+    axes[2, 0].axhline(y=0, color="gray", linestyle="--",
                        linewidth=0.8, alpha=0.6)
 
-    _plot_metric(axes[1, 1], entropy, "Policy Entropy",
+    _plot_metric(axes[2, 1], entropy, "Policy Entropy",
                  "Update Step", "Entropy (nats)", color="tab:cyan", ma_win=step_window)
 
-    _plot_metric(axes[1, 2], grad_norm, "Gradient Norm",
+    _plot_metric(axes[2, 2], grad_norm, "Gradient Norm",
                  "Update Step", r"$||\nabla||_2$", color="tab:brown", ma_win=step_window)
 
-    # Eval Score History (replaces epsilon subplot from reference)
-    ax_eval = axes[1, 3]
-    if eval_episodes:
-        ax_eval.plot(eval_episodes, eval_rewards,
-                     color="tab:red", marker="o", markersize=5, linewidth=1.3)
-    else:
-        ax_eval.text(0.5, 0.5, "No eval yet", transform=ax_eval.transAxes,
-                     ha="center", va="center", fontsize=10, color="gray")
-    ax_eval.set_title("Evaluation Score History", fontsize=11, fontweight="bold")
-    ax_eval.set_xlabel("Episode")
-    ax_eval.set_ylabel("Eval Reward")
-    ax_eval.tick_params(labelsize=8)
-    ax_eval.grid(True, alpha=0.3)
-
-    # ── Row 2 ──────────────────────────────────────────────────────────
-    _plot_metric(axes[2, 0], iterations, "Episode Iterations (Survival)",
-                 "Episode", "Frames", color="tab:blue")
-    if eval_episodes:
-        axes[2, 0].scatter(eval_episodes, eval_survivals,
-                           color="red", marker="s", s=30, zorder=5,
-                           label="Eval", edgecolors="black", linewidths=0.3)
-        axes[2, 0].legend(fontsize=7, loc="best")
-    if iterations is not None and len(iterations) > 0:
-        axes[2, 0].axhline(y=max(iterations), color="gray",
-                           linestyle=":", linewidth=1, alpha=0.5)
-
-    # Eval Survival History
-    ax_es = axes[2, 1]
-    if eval_episodes:
-        ax_es.plot(eval_episodes, eval_survivals,
-                   color="tab:blue", marker="s", markersize=4, linewidth=1.3)
-    else:
-        ax_es.text(0.5, 0.5, "No eval yet", transform=ax_es.transAxes,
-                   ha="center", va="center", fontsize=10, color="gray")
-    ax_es.set_title("Eval Survival History", fontsize=11, fontweight="bold")
-    ax_es.set_xlabel("Episode")
-    ax_es.set_ylabel("Survival (frames)")
-    ax_es.tick_params(labelsize=8)
-    ax_es.grid(True, alpha=0.3)
-
-    # Loss (Log Scale)
-    ax_logl = axes[2, 2]
-    if loss is not None and len(loss) > 0:
-        sx, sy = _rolling_mean(loss, step_window)
-        ax_logl.semilogy(sx, sy + 1e-10, color="tab:red", linewidth=1.8,
-                         label=f"Loss (log, MA{step_window})")
-        ax_logl.legend(fontsize=7, loc="best")
-    else:
-        ax_logl.text(0.5, 0.5, "No data yet", transform=ax_logl.transAxes,
-                     ha="center", va="center", fontsize=10, color="gray")
-    ax_logl.set_title("Loss (Log Scale)", fontsize=11, fontweight="bold")
-    ax_logl.set_xlabel("Update Step")
-    ax_logl.set_ylabel("Loss")
-    ax_logl.tick_params(labelsize=8)
-    ax_logl.grid(True, alpha=0.3, which="both")
-
-    # Reward vs Iterations scatter
+    # Reward vs Iterations scatter (episode data, both axes are value-based)
     ax_sc = axes[2, 3]
     if (rewards is not None and len(rewards) > 0
             and iterations is not None and len(iterations) > 0):
-        step = max(1, len(rewards) // 5000)
-        ax_sc.scatter(rewards[::step], iterations[::step],
+        s = max(1, len(rewards) // 5000)
+        ax_sc.scatter(rewards[::s], iterations[::s],
                       alpha=0.3, s=3, color="tab:blue", edgecolors="none")
     else:
         ax_sc.text(0.5, 0.5, "No data yet", transform=ax_sc.transAxes,
@@ -268,7 +273,7 @@ def plot_training(save_path, rewards, iterations, loss,
 
     # ── Stage-change markers (episode-based subplots only) ────────────
     if stage_events:
-        episode_axes = [axes[0, 0], axes[1, 3], axes[2, 0], axes[2, 1]]
+        episode_axes = [axes[0, 0], axes[0, 1], axes[0, 2], axes[0, 3]]
         for idx, (ep, stage_name) in enumerate(stage_events):
             for ax in episode_axes:
                 ax.axvline(ep, color="tab:red", linestyle="--",
