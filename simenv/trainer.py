@@ -422,6 +422,9 @@ def train_sim(
             training_max_q=training_max_q,
             training_td_error=training_td_error,
             training_grad_norm=training_grad_norm,
+            training_q_wait=training_q_wait,
+            training_delta_mean=training_delta_mean,
+            training_delta_max=training_delta_max,
             plot_callback=plot_callback,
         )
 
@@ -556,11 +559,24 @@ def _copy_if_exists(src, dst):
 
 
 def _network_hidden_sizes(network):
-    linears = [
-        module for module in network.network
-        if isinstance(module, torch.nn.Linear)
-    ]
-    return [int(layer.out_features) for layer in linears[:-1]]
+    """Extract hidden layer sizes from a DDQN network.
+
+    Handles both plain ``nn.Sequential`` (``self.network``) and
+    Differential / Dueling architectures (``self.trunk``).
+    """
+    sequential = getattr(network, "network", None)
+    if sequential is not None:
+        source = sequential
+        # Standard MLP: last Linear is the output layer → exclude it
+        linears = [m for m in source if isinstance(m, torch.nn.Linear)]
+        return [int(layer.out_features) for layer in linears[:-1]]
+    else:
+        source = getattr(network, "trunk", None)
+    if source is None:
+        return []
+    # Trunk-only architectures (Differential, Dueling): no output layer in trunk
+    linears = [m for m in source if isinstance(m, torch.nn.Linear)]
+    return [int(layer.out_features) for layer in linears]
 
 
 def _git_info(project_root):
