@@ -48,6 +48,121 @@ class ReplayBuffer:
         return self._size / max(1, self.burn_in)
 
 
+class SumTree:
+    """Binary sum-tree for O(log N) priority-based sampling."""
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.tree = np.zeros(2 * capacity - 1, dtype=np.float64)
+        self._ptr = 0
+        self.n_entries = 0
+
+    def total(self) -> float:
+        return float(self.tree[0])
+
+    def max_priority(self) -> float:
+        leaves = self.tree[self.capacity - 1:self.capacity - 1 + self.n_entries]
+        return float(np.max(leaves)) if self.n_entries > 0 else 1.0
+
+    def add(self, priority: float) -> int:
+        idx = self._ptr + self.capacity - 1
+        self.update(idx, priority)
+        self._ptr = (self._ptr + 1) % self.capacity
+        self.n_entries = min(self.n_entries + 1, self.capacity)
+        return idx
+
+    def update(self, idx: int, priority: float):
+        delta = priority - self.tree[idx]
+        self.tree[idx] = priority
+        while idx > 0:
+            idx = (idx - 1) // 2
+            self.tree[idx] += delta
+
+    def get_leaf(self, value: float) -> int:
+        idx = 0
+        while idx < self.capacity - 1:
+            left = 2 * idx + 1
+            if value <= self.tree[left]:
+                idx = left
+            else:
+                value -= self.tree[left]
+                idx = left + 1
+        return idx
+
+    def sample(self, n: int) -> np.ndarray:
+        indices = np.empty(n, dtype=np.int64)
+        total = self.total()
+        if total <= 0:
+            offset = self.capacity - 1
+            indices[:] = offset + np.random.randint(0, self.n_entries, size=n)
+            return indices
+        segment = total / n
+        for i in range(n):
+            value = np.random.uniform(i * segment, (i + 1) * segment)
+            indices[i] = self.get_leaf(min(value, total - 1e-12))
+        return indices
+
+
+class PrioritizedReplayBuffer:
+    """Prioritized Experience Replay (Schaul et al., 2016).
+
+    Stores transitions in a fixed-size ring buffer and samples them
+    proportional to ``priority ** alpha`` via a SumTree.
+    """
+
+    def __init__(self, memory_size=50000, burn_in=10000,
+                 alpha: float = 0.6, epsilon: float = 1e-6):
+        self.memory_size = memory_size
+        self.burn_in = burn_in
+        self.alpha = alpha
+        self.epsilon = epsilon
+
+        self.Buffer = namedtuple(
+            "Buffer",
+            field_names=[
+                "state", "action", "reward", "done",
+                "next_state", "mask", "next_mask",
+            ],
+        )
+        self.replay_memory = [None] * memory_size
+        self.sum_tree = SumTree(memory_size)
+        self._write_ptr = 0
+
+    def __len__(self):
+        return self.sum_tree.n_entries
+
+    def burn_in_capacity(self):
+        return self.sum_tree.n_entries / max(1, self.burn_in)
+
+    def append(self, state, action, reward, done, next_state, mask, next_mask):
+        self.replay_memory[self._write_ptr] = self.Buffer(
+            state, action, reward, done, next_state, mask, next_mask,
+        )
+        max_p = self.sum_tree.max_priority()
+        priority = max(max_p, 1.0)
+        self.sum_tree.add(priority ** self.alpha)
+        self._write_ptr = (self._write_ptr + 1) % self.memory_size
+
+    def sample_batch(self, batch_size=32, beta: float = 0.4):
+        tree_indices = self.sum_tree.sample(batch_size)
+        data_indices = tree_indices - (self.sum_tree.capacity - 1)
+
+        probs = self.sum_tree.tree[tree_indices] / max(self.sum_tree.total(), 1e-12)
+        n = self.sum_tree.n_entries
+        is_weights = (n * probs) ** (-beta)
+        is_weights /= max(is_weights.max(), 1e-12)
+
+        entries = [self.replay_memory[i] for i in data_indices]
+        batch = zip(*entries)
+        return batch, tree_indices, is_weights.astype(np.float32).reshape(-1, 1)
+
+    def update_priorities(self, tree_indices, td_errors):
+        flat_errors = np.asarray(td_errors, dtype=np.float64).reshape(-1)
+        for idx, td_err in zip(tree_indices, flat_errors):
+            priority = float(abs(td_err)) + self.epsilon
+            self.sum_tree.update(int(idx), priority ** self.alpha)
+
+
 class DDQNNetwork(nn.Module):
     def __init__(self, env, learning_rate=1e-3, device="cpu",
                  hidden_sizes=None):
@@ -264,10 +379,10 @@ def transform_observation(observation):
 _loss_fn = nn.SmoothL1Loss(beta=1.0)
 
 # Return type for calculate_loss: loss scalar + diagnostics
-LossResult = namedtuple("LossResult", ["loss", "diagnostics"])
+LossResult = namedtuple("LossResult", ["loss", "diagnostics", "td_errors"])
 
 
-def calculate_loss(network, target_network, batch, gamma):
+def calculate_loss(network, target_network, batch, gamma, is_weights=None):
     """Double-DQN loss with training diagnostics.
 
     Returns a :class:`LossResult` containing the scalar Huber loss and a
@@ -343,7 +458,16 @@ def calculate_loss(network, target_network, batch, gamma):
         "delta_max": delta_max,
     }
 
-    return LossResult(
-        loss=_loss_fn(qvals, expected_qvals),
-        diagnostics=diagnostics,
-    )
+    # Apply PER importance-sampling weights if provided
+    with torch.no_grad():
+        td_errors = (expected_qvals - qvals).detach().cpu().numpy()
+    if is_weights is not None:
+        is_weights_t = torch.as_tensor(
+            is_weights, dtype=torch.float32, device=qvals.device,
+        )
+        elementwise = F.smooth_l1_loss(qvals, expected_qvals, beta=1.0, reduction='none')
+        loss = (elementwise * is_weights_t).mean()
+    else:
+        loss = _loss_fn(qvals, expected_qvals)
+
+    return LossResult(loss=loss, diagnostics=diagnostics, td_errors=td_errors)

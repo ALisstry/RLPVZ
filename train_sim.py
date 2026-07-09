@@ -308,8 +308,22 @@ if __name__ == "__main__":
         default=False,
         help="Use Differential Q-Network: Q(s,a) = Q(s,wait) + Δ(s,a)",
     )
+    parser.add_argument(
+        "--hidden_sizes",
+        type=int,
+        nargs="+",
+        default=[2048, 2048],
+        help="Hidden layer sizes (default: 2048 2048)",
+    )
+    parser.add_argument(
+        "--use_per",
+        action="store_true",
+        default=False,
+        help="Use Prioritized Experience Replay (PER)",
+    )
     args = parser.parse_args()
 
+    hidden_sizes = args.hidden_sizes if args.hidden_sizes else [2048, 2048]
     from simenv.trainer import train_sim
     train_sim(
         max_episodes=100000,
@@ -321,6 +335,8 @@ if __name__ == "__main__":
         network_sync_freq=2000,
         eval_episodes=100,
         plot_callback=plot_training,
+        hidden_sizes=hidden_sizes,
         use_factored=args.use_factored,
         use_differential=args.use_differential,
+        use_per=args.use_per,
     )

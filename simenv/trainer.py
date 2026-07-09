@@ -18,7 +18,8 @@ from simenv.config import CURRICULUM
 from simenv.curriculum import build_curriculum
 from simenv.pvz_sim import config
 from simenv.model import (
-    ReplayBuffer, DDQNNetwork, DifferentialDDQNNetwork, FactoredDDQNNetwork,
+    ReplayBuffer, PrioritizedReplayBuffer,
+    DDQNNetwork, DifferentialDDQNNetwork, FactoredDDQNNetwork,
     transform_observation, calculate_loss, LossResult,
 )
 from training.evaluation import (
@@ -67,6 +68,11 @@ def train_sim(
     plot_callback=None,
     use_differential=False,
     use_factored=False,
+    hidden_sizes=None,
+    use_per=False,
+    per_alpha=0.6,
+    per_beta_start=0.4,
+    per_epsilon=1e-6,
 ):
     if save_path is None:
         save_path = _default_save_path("ddqn", "sim_ddqn.pt")
@@ -103,9 +109,16 @@ def train_sim(
         NetworkCls = DifferentialDDQNNetwork
     else:
         NetworkCls = DDQNNetwork
-    network = NetworkCls(env, learning_rate=lr, device=device)
+    network = NetworkCls(env, learning_rate=lr, device=device,
+                         hidden_sizes=hidden_sizes)
     target_network = deepcopy(network)
-    buffer = ReplayBuffer(memory_size=buffer_size, burn_in=burn_in)
+    if use_per:
+        buffer = PrioritizedReplayBuffer(
+            memory_size=buffer_size, burn_in=burn_in,
+            alpha=per_alpha, epsilon=per_epsilon,
+        )
+    else:
+        buffer = ReplayBuffer(memory_size=buffer_size, burn_in=burn_in)
     threshold = EpsilonSchedule(
         seq_length=max_episodes,
         start_epsilon=1.0,
@@ -120,6 +133,7 @@ def train_sim(
             else "ddqn"
         ),
         network_params=sum(p.numel() for p in network.parameters()),
+        hidden_sizes=_network_hidden_sizes(network),
         max_episodes=max_episodes,
         buffer_size=buffer_size,
         burn_in=burn_in,
@@ -244,8 +258,16 @@ def train_sim(
 
             if step_count % network_update_freq == 0:
                 network.optimizer.zero_grad(set_to_none=True)
-                batch = buffer.sample_batch(batch_size=batch_size)
-                result = calculate_loss(network, target_network, batch, gamma)
+                if use_per:
+                    beta = per_beta_start + (1.0 - per_beta_start) * min(
+                        1.0, ep / max(1, max_episodes))
+                    batch, tree_indices, is_weights = buffer.sample_batch(
+                        batch_size=batch_size, beta=beta)
+                    result = calculate_loss(
+                        network, target_network, batch, gamma, is_weights=is_weights)
+                else:
+                    batch = buffer.sample_batch(batch_size=batch_size)
+                    result = calculate_loss(network, target_network, batch, gamma)
                 result.loss.backward()
                 # ── Gradient norm (before optimizer step) ──
                 total_norm = 0.0
@@ -255,6 +277,8 @@ def train_sim(
                 grad_norm = total_norm ** 0.5
                 nn.utils.clip_grad_norm_(network.parameters(), max_grad_norm)
                 network.optimizer.step()
+                if use_per:
+                    buffer.update_priorities(tree_indices, result.td_errors)
                 training_loss.append(result.loss.detach().item())
                 training_advantage.append(result.diagnostics["advantage"])
                 training_entropy.append(result.diagnostics["entropy"])
@@ -365,10 +389,18 @@ def train_sim(
                     env.apply_stage(curriculum.current_stage)
                     target_network.load_state_dict(network.state_dict())
                     stage_burn_in = _stage_burn_in(curriculum.current_stage, burn_in)
-                    buffer = ReplayBuffer(
-                        memory_size=buffer_size,
-                        burn_in=stage_burn_in,
-                    )
+                    if use_per:
+                        buffer = PrioritizedReplayBuffer(
+                            memory_size=buffer_size,
+                            burn_in=stage_burn_in,
+                            alpha=per_alpha,
+                            epsilon=per_epsilon,
+                        )
+                    else:
+                        buffer = ReplayBuffer(
+                            memory_size=buffer_size,
+                            burn_in=stage_burn_in,
+                        )
                     s_0, mask, step_count, stopped = _burn_in_stage(
                         env,
                         buffer,
@@ -452,6 +484,9 @@ def _print_config(**cfg):
     print(f"{sep}")
     print(f"  {'Device:':24s} {cfg['device'].upper()}")
     print(f"  {'Network:':24s} {cfg['network_type']} ({cfg['network_params']:,} params)")
+    sizes = cfg.get('hidden_sizes')
+    if sizes:
+        print(f"  {'Hidden sizes:':24s} {sizes}")
     print(f"  {'Max episodes:':24s} {cfg['max_episodes']}")
     print(f"  {'Buffer size:':24s} {cfg['buffer_size']}")
     print(f"  {'Burn-in steps:':24s} {cfg['burn_in']}")
