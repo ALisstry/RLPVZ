@@ -28,9 +28,18 @@ class MemoryReader:
             self.process, address, ctypes.byref(buf), 4, ctypes.byref(bytes_read)
         )
         if not result or bytes_read.value != 4:
-            return 0  # Return default value instead of raising to avoid crashes
+            return 0
         return buf.value
-    
+
+    def write_int(self, address: int, value: int) -> bool:
+        """Write a 4-byte integer to process memory"""
+        buf = ctypes.c_int(value)
+        bytes_written = ctypes.c_size_t()
+        result = self.kernel32.WriteProcessMemory(
+            self.process, address, ctypes.byref(buf), 4, ctypes.byref(bytes_written)
+        )
+        return bool(result) and bytes_written.value == 4
+
     def read_uint(self, address: int) -> int:
         """Read a 4-byte unsigned integer from memory"""
         buf = ctypes.c_uint()

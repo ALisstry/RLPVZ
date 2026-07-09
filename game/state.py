@@ -26,8 +26,13 @@ class SeedInfo:
     
     @property
     def is_ready(self) -> bool:
-        """Check if the seed is ready to use"""
-        return self.usable and self.recharge_countdown <= 0
+        """Check if the seed is ready to use.
+
+        Only checks recharge_countdown — the ``usable`` bool lives at
+        offset 0x70 which falls outside the 0x50-byte SEED_SIZE stride
+        and reads garbage for the last card slot.
+        """
+        return self.recharge_countdown <= 0
     
     @property
     def cooldown_percent(self) -> float:
@@ -193,13 +198,13 @@ class GameState:
     
     def get_usable_seeds(self) -> List[SeedInfo]:
         """Get all seeds that are currently usable"""
-        return [s for s in self.seeds if s.usable]
-    
+        return [s for s in self.seeds if s.is_ready]
+
     def can_plant(self, plant_type: int) -> bool:
         """Check if we can plant a specific type (have card and enough sun)"""
         from data.plants import PLANT_COST
         seed = self.get_seed_by_type(plant_type)
-        if not seed or not seed.usable:
+        if not seed or not seed.is_ready:
             return False
         cost = PLANT_COST.get(plant_type, 100)
         return self.sun >= cost

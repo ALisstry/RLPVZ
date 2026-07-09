@@ -40,8 +40,6 @@ def _ddqn_worker_run(env, network, num_episodes, start_index, total_episodes, wo
     """Run DDQN eval episodes on a single env (used by parallel workers)."""
     details = []
     _wait_idx = env.action_space.n - 1
-    _grid_size = env.rows * env.cols
-    _num_cards = getattr(env, 'num_cards', 10)
     for i in range(num_episodes):
         state = env.reset()
         done = False
@@ -52,23 +50,10 @@ def _ddqn_worker_run(env, network, num_episodes, start_index, total_episodes, wo
         _ep_gaps = []
         _wait_choice = 0   # 能种却选了 wait
         _wait_forced = 0   # 只能 wait（冷却/阳光/满格）
-        _card_avail_steps = np.zeros(_num_cards, dtype=int)  # 每张卡可用的步数
-        _card_selected = np.zeros(_num_cards, dtype=int)     # 每张卡被选中的次数
         _prev_done_ts = __import__("time").time()
         while not done:
             mask = env.mask_available_actions()
-            # 统计每张卡在当前 mask 中是否至少有 1 个可用格子
-            for _c in range(_num_cards):
-                _start = _c * _grid_size
-                _end = _start + _grid_size
-                if _end <= len(mask) and np.any(mask[_start:_end]):
-                    _card_avail_steps[_c] += 1
             action = network.get_greedy_action(state, mask)
-            # 统计每张卡被选中的次数（非 wait 动作）
-            if action != _wait_idx:
-                _card = action // _grid_size
-                if 0 <= _card < _num_cards:
-                    _card_selected[_card] += 1
             if action == _wait_idx:
                 if np.any(mask[:-1]):
                     _wait_choice += 1
@@ -128,13 +113,6 @@ def _ddqn_worker_run(env, network, num_episodes, start_index, total_episodes, wo
             )
         )
         _st = _diag["step_timing"]
-        # 卡片诊断：可用步数 + 被选中次数
-        _card_pct = " ".join(
-            f"c{_c}={_card_avail_steps[_c]}/{actions}"
-            f"(sel={_card_selected[_c]})"
-            for _c in range(_num_cards)
-            if actions > 0
-        )
         print(
             f"[Eval][DDQN][W{worker_id}] episode {episode_index}/{total_episodes} | "
             f"reward={total_reward:.2f} | "
@@ -147,20 +125,6 @@ def _ddqn_worker_run(env, network, num_episodes, start_index, total_episodes, wo
             f"slow={_st['slow_steps']}, mean={_st['mean_sec']*1000:.0f}ms)",
             flush=True,
         )
-        if _card_pct:
-            print(f"  card_diag: {_card_pct}", flush=True)
-        # 如果某张卡被选中次数远超可用次数，说明 mask 与实际可用性不一致
-        _bug_cards = [
-            _c for _c in range(_num_cards)
-            if _card_selected[_c] > _card_avail_steps[_c] and _card_selected[_c] > 0
-        ]
-        if _bug_cards:
-            print(
-                f"  ⚠ MASK BUG? cards with sel>avail: " +
-                " ".join(f"c{_c}(sel={_card_selected[_c]},avail={_card_avail_steps[_c]})"
-                         for _c in _bug_cards),
-                flush=True,
-            )
     return details
 
 

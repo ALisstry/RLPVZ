@@ -369,6 +369,11 @@ def main(argv=None):
     episodes = eval_args.eval_episodes or 100
 
     env_spec, scenario_spec = build_base_eval_specs(args)
+    if eval_args.debug:
+        from dataclasses import replace
+        scenario_spec = replace(scenario_spec, initial_sun=5000)
+        args.initial_sun = 5000
+        print("[Benchmark] DEBUG mode: initial_sun=5000", flush=True)
     _print_eval_metadata(
         args=args,
         model_path=model_path,
@@ -489,6 +494,12 @@ def _parse_eval_args(argv=None):
         type=int,
         default=1,
         help="Number of parallel workers for evaluation (requires multiple game instances)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Debug mode: initial sun=5000, verbose logging",
     )
     eval_args, train_argv = parser.parse_known_args(argv)
     if eval_args.algo:

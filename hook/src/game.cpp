@@ -503,15 +503,19 @@ bool Rock() {
 }
 
 // PlantCard - Use a card from hand at position
+// AVZ 对比: y 需 +40 偏移瞄向格子中心 (avz_click.cpp AGridToCoordinate)
 bool PlantCard(int x, int y, int index) {
     uintptr_t board = GetBoard();
     if (!board) return false;
-    
+
     uintptr_t seedBank = *(uintptr_t*)(board + 0x144);
     if (!seedBank) return false;
-    
+
     uintptr_t cardAddr = seedBank + index * 0x50 + 0x28;
-    
+
+    // AVZ: y += 40 — 格子中心偏移
+    y += 40;
+
     __asm {
         push y
         push x
@@ -523,7 +527,8 @@ bool PlantCard(int x, int y, int index) {
         mov edx, 0x40FD30
         call edx
     }
-    
+
+    ReleaseMouse();
     return true;
 }
 
