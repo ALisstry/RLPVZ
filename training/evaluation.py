@@ -376,6 +376,7 @@ def _episode_diagnostics_row(
 ) -> dict[str, Any]:
     action_stats = diagnostics.get("action_stats") or {}
     sun_stats = diagnostics.get("sun_stats") or {}
+    step_timing = diagnostics.get("step_timing") or {}
     return {
         "episode_index": detail.episode_index,
         "wait_actions": int(action_stats.get("wait", 0)),
@@ -391,6 +392,13 @@ def _episode_diagnostics_row(
         "sun_gained": int(sun_stats.get("sun_gained", 0)),
         "sun_spent": int(sun_stats.get("sun_spent", 0)),
         "wait_with_high_sun": int(sun_stats.get("wait_with_high_sun", 0)),
+        "step_total_sec": float(step_timing.get("total_sec", 0.0)),
+        "step_max_sec": float(step_timing.get("max_sec", 0.0)),
+        "step_max_gap_sec": float(step_timing.get("max_gap_sec", 0.0)),
+        "step_slow_count": int(step_timing.get("slow_steps", 0)),
+        "step_mean_sec": float(step_timing.get("mean_sec", 0.0)),
+        "wait_choice": int(step_timing.get("wait_choice", 0)),
+        "wait_forced": int(step_timing.get("wait_forced", 0)),
     }
 
 

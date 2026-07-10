@@ -54,18 +54,55 @@ def _print_network_summary(network, use_paper, hidden_sizes, device):
     trainable_params = sum(p.numel() for p in network.parameters() if p.requires_grad)
 
     is_cnn = hasattr(network, '_n_grid_channels')
-    is_factored = getattr(network, '_use_factored', False)
+    is_cnn_factored = is_cnn and getattr(network, '_use_factored', False)
+    is_mlp_factored = hasattr(network, 'head_row') and hasattr(network, 'head_col')  # 3-factor MLP
+    is_differential = hasattr(network, '_wait_idx') and not is_cnn
+    is_dueling = hasattr(network, 'value_head') and not is_cnn
+
+    arch_tags = []
+    if is_cnn:
+        arch_tags.append("CNN")
+    if is_cnn_factored:
+        arch_tags.append("Factored(2F)")
+    if is_mlp_factored:
+        arch_tags.append("Factored(3F)")
+    if is_differential:
+        arch_tags.append("Differential")
+    elif is_dueling:
+        arch_tags.append("Dueling")
+    tag_str = f" ({' + '.join(arch_tags)})" if arch_tags else ""
 
     print(f"\n{'='*60}")
-    print(f"  DDQN Network Summary{' (CNN)' if is_cnn else ''}{' (Factored)' if is_factored else ''}")
+    print(f"  DDQN Network Summary{tag_str}")
     print(f"{'='*60}")
     print(f"  Device:        {device}")
     print(f"  Observation:   596 dim {'(paper format)' if use_paper else ''}")
     print(f"  Actions:       {n_outputs}")
-    if is_factored:
+    if is_cnn_factored:
         print(f"  Action heads:  wait(1) + pos(45) + card(10) = 56 → outer-sum → 451")
+    if is_mlp_factored:
+        print(f"  Action heads:  card(10) + row(5) + col(9) + wait(1) = 25 → enumerate → 451")
     if is_cnn:
-        print(f"  Architecture:  3x3-CNN + 1x9-CNN | global-MLP -> {'factored heads' if is_factored else 'head'}")
+        print(f"  Architecture:  3x3-CNN + 1x9-CNN | global-MLP -> {'factored heads' if is_cnn_factored else 'head'}")
+    elif is_mlp_factored:
+        hidden_str = " -> ".join(str(h) for h in (hidden_sizes or [256, 128]))
+        trunk_out = hidden_sizes[-1] if hidden_sizes else (hidden_sizes[0] if hidden_sizes else 256)
+        print(f"  Hidden layers: {hidden_str}")
+        print(f"  Activation:    LeakyReLU")
+        print(f"  Architecture:  596 -> {hidden_str} ─┬─ head_card({trunk_out}) → 10")
+        print(f"                     {' ' * len(hidden_str)}  ├─ head_row({trunk_out})  →  5")
+        print(f"                     {' ' * len(hidden_str)}  ├─ head_col({trunk_out})  →  9")
+        print(f"                     {' ' * len(hidden_str)}  └─ head_wait({trunk_out}) →  1")
+        print(f"  Q(card,row,col) = q_card+ q_row+ q_col  → enumerate 450 + wait → 451")
+    elif is_differential:
+        hidden_str = " -> ".join(str(h) for h in (hidden_sizes or [256, 128]))
+        print(f"  Hidden layers: {hidden_str}")
+        print(f"  Activation:    LeakyReLU")
+        trunk_str = " -> ".join(str(h) for h in (hidden_sizes[:-1] if hidden_sizes and len(hidden_sizes) >= 2 else (hidden_sizes or [256, 128])[:1]))
+        branch_dim = hidden_sizes[-1] if hidden_sizes and len(hidden_sizes) >= 2 else (hidden_sizes[0] if hidden_sizes else 256)
+        print(f"  Architecture:  596 -> {trunk_str} ─┬─ wait_head({branch_dim})  → Q(s,wait)")
+        print(f"                     {' ' * len(trunk_str)}  └─ delta_head({branch_dim}) → Δ(s,a)")
+        print(f"  Q(s,a) = Q(s,wait) + Δ(s,a),  Δ(s,wait) ≡ 0")
     else:
         hidden_str = " -> ".join(str(h) for h in (hidden_sizes or [256, 128]))
         print(f"  Hidden layers: {hidden_str}")
@@ -180,10 +217,19 @@ class DDQNAlgorithm:
                 use_factored=use_factored,
             )
         else:
+            use_factored = getattr(context.args, "use_factored", False)
+            use_differential = getattr(context.args, "use_differential", False)
             use_dueling = getattr(context.args, "use_dueling", False)
-            NetworkCls = (
-                DuelingQNetwork if use_dueling else QNetwork
-            )
+            if use_factored:
+                from .factored_network import FactoredQNetwork
+                NetworkCls = FactoredQNetwork
+            elif use_differential:
+                from .ddqn import DifferentialQNetwork
+                NetworkCls = DifferentialQNetwork
+            elif use_dueling:
+                NetworkCls = DuelingQNetwork
+            else:
+                NetworkCls = QNetwork
             network = NetworkCls(
                 env,
                 learning_rate=context.args.ddqn_lr,

@@ -10,6 +10,7 @@ import subprocess
 from datetime import datetime
 import numpy as np
 import torch
+import torch.nn as nn
 from copy import deepcopy
 
 from simenv import SimPVZEnv
@@ -17,7 +18,9 @@ from simenv.config import CURRICULUM
 from simenv.curriculum import build_curriculum
 from simenv.pvz_sim import config
 from simenv.model import (
-    ReplayBuffer, DDQNNetwork, transform_observation, calculate_loss,
+    ReplayBuffer, PrioritizedReplayBuffer,
+    DDQNNetwork, DifferentialDDQNNetwork, FactoredDDQNNetwork,
+    transform_observation, calculate_loss, LossResult,
 )
 from training.evaluation import (
     BestEvaluationCheckpoint,
@@ -48,7 +51,7 @@ class EpsilonSchedule:
 
 
 def train_sim(
-    max_episodes=200000,
+    max_episodes=100000,
     buffer_size=100000,
     burn_in=10000,
     batch_size=512,
@@ -59,12 +62,24 @@ def train_sim(
     save_path=None,
     eval_episodes=100,
     eval_freq_episodes=2500,
+    max_grad_norm=0.5,
     visualize=False,
     plot_freq=100,
     plot_callback=None,
+    use_differential=False,
+    use_factored=False,
+    hidden_sizes=None,
+    use_per=False,
+    per_alpha=0.6,
+    per_beta_start=0.4,
+    per_epsilon=1e-6,
 ):
     if save_path is None:
-        save_path = _default_save_path("ddqn", "sim_ddqn.pt")
+        config_tag = _build_config_tag(
+            use_factored=use_factored, use_differential=use_differential,
+            use_per=use_per, hidden_sizes=hidden_sizes,
+        )
+        save_path = _default_save_path("ddqn", "sim_ddqn.pt", tag=config_tag)
     output_dir = os.path.dirname(save_path) or "."
     eval_config = EvaluationConfig(
         enabled=eval_freq_episodes > 0 and eval_episodes > 0,
@@ -92,9 +107,22 @@ def train_sim(
     )
     if getattr(curriculum, "enabled", True):
         env.apply_stage(curriculum.current_stage)
-    network = DDQNNetwork(env, learning_rate=lr, device=device)
+    if use_factored:
+        NetworkCls = FactoredDDQNNetwork
+    elif use_differential:
+        NetworkCls = DifferentialDDQNNetwork
+    else:
+        NetworkCls = DDQNNetwork
+    network = NetworkCls(env, learning_rate=lr, device=device,
+                         hidden_sizes=hidden_sizes)
     target_network = deepcopy(network)
-    buffer = ReplayBuffer(memory_size=buffer_size, burn_in=burn_in)
+    if use_per:
+        buffer = PrioritizedReplayBuffer(
+            memory_size=buffer_size, burn_in=burn_in,
+            alpha=per_alpha, epsilon=per_epsilon,
+        )
+    else:
+        buffer = ReplayBuffer(memory_size=buffer_size, burn_in=burn_in)
     threshold = EpsilonSchedule(
         seq_length=max_episodes,
         start_epsilon=1.0,
@@ -103,14 +131,20 @@ def train_sim(
 
     _print_config(
         device=device,
-        network_type="ddqn",
+        network_type=(
+            "ddqn_factored" if use_factored
+            else "ddqn_differential" if use_differential
+            else "ddqn"
+        ),
         network_params=sum(p.numel() for p in network.parameters()),
+        hidden_sizes=_network_hidden_sizes(network),
         max_episodes=max_episodes,
         buffer_size=buffer_size,
         burn_in=burn_in,
         batch_size=batch_size,
         gamma=gamma,
         lr=lr,
+        max_grad_norm=max_grad_norm,
         network_update_freq=network_update_freq,
         network_sync_freq=network_sync_freq,
         eval_episodes=eval_episodes,
@@ -137,6 +171,7 @@ def train_sim(
         batch_size=batch_size,
         gamma=gamma,
         lr=lr,
+        max_grad_norm=max_grad_norm,
         network_update_freq=network_update_freq,
         network_sync_freq=network_sync_freq,
         eval_config=eval_config,
@@ -144,9 +179,18 @@ def train_sim(
     )
 
     training_rewards = []
-    training_loss = []
     training_iterations = []
-    update_loss = []
+    # Per‑training‑step diagnostics (one entry per optimizer step)
+    training_loss = []
+    training_advantage = []
+    training_entropy = []
+    training_mean_q = []
+    training_max_q = []
+    training_td_error = []
+    training_grad_norm = []
+    training_q_wait = []
+    training_delta_mean = []
+    training_delta_max = []
     step_count = 0
     window = 100
     last_eval_episode = None
@@ -168,12 +212,21 @@ def train_sim(
                 training_rewards,
                 training_iterations,
                 training_loss,
+                training_advantage=training_advantage,
+                training_entropy=training_entropy,
+                training_mean_q=training_mean_q,
+                training_max_q=training_max_q,
+                training_td_error=training_td_error,
+                training_grad_norm=training_grad_norm,
+                training_q_wait=training_q_wait,
+                training_delta_mean=training_delta_mean,
+                training_delta_max=training_delta_max,
                 plot_callback=plot_callback,
             )
 
     signal.signal(signal.SIGINT, _handle_interrupt)
 
-    s_0, step_count, stopped = _burn_in_stage(
+    s_0, mask, step_count, stopped = _burn_in_stage(
         env,
         buffer,
         step_count=step_count,
@@ -197,23 +250,49 @@ def train_sim(
                 epsilon = curriculum.epsilon()
             else:
                 epsilon = threshold.epsilon(ep)
-            mask = np.array(env.mask_available_actions())
             action = network.decide_action(s_0, mask, epsilon=epsilon)
             s_1, r, done, info = env.step(action)
             s_1 = transform_observation(s_1)
-            next_mask = np.array(env.mask_available_actions())
+            next_mask = info.get("mask", env.mask_available_actions())
             rewards += r
             buffer.append(s_0, action, r, done, s_1, mask, next_mask)
-            s_0 = s_1.copy()
+            s_0 = s_1               # transform_observation already copied
+            mask = next_mask         # carry forward to next step
             step_count += 1
 
             if step_count % network_update_freq == 0:
                 network.optimizer.zero_grad(set_to_none=True)
-                batch = buffer.sample_batch(batch_size=batch_size)
-                loss = calculate_loss(network, target_network, batch, gamma)
-                loss.backward()
+                if use_per:
+                    beta = per_beta_start + (1.0 - per_beta_start) * min(
+                        1.0, ep / max(1, max_episodes))
+                    batch, tree_indices, is_weights = buffer.sample_batch(
+                        batch_size=batch_size, beta=beta)
+                    result = calculate_loss(
+                        network, target_network, batch, gamma, is_weights=is_weights)
+                else:
+                    batch = buffer.sample_batch(batch_size=batch_size)
+                    result = calculate_loss(network, target_network, batch, gamma)
+                result.loss.backward()
+                # ── Gradient norm (before optimizer step) ──
+                total_norm = 0.0
+                for p in network.parameters():
+                    if p.grad is not None:
+                        total_norm += p.grad.data.norm(2).item() ** 2
+                grad_norm = total_norm ** 0.5
+                nn.utils.clip_grad_norm_(network.parameters(), max_grad_norm)
                 network.optimizer.step()
-                update_loss.append(loss.detach().item())
+                if use_per:
+                    buffer.update_priorities(tree_indices, result.td_errors)
+                training_loss.append(result.loss.detach().item())
+                training_advantage.append(result.diagnostics["advantage"])
+                training_entropy.append(result.diagnostics["entropy"])
+                training_mean_q.append(result.diagnostics["mean_q"])
+                training_max_q.append(result.diagnostics["max_q"])
+                training_td_error.append(result.diagnostics["td_error"])
+                training_grad_norm.append(grad_norm)
+                training_q_wait.append(result.diagnostics["q_wait"])
+                training_delta_mean.append(result.diagnostics["delta_mean"])
+                training_delta_max.append(result.diagnostics["delta_max"])
 
             if step_count % network_sync_freq == 0:
                 target_network.load_state_dict(network.state_dict())
@@ -222,9 +301,6 @@ def train_sim(
                 ep += 1
                 training_rewards.append(rewards)
                 training_iterations.append(float(info.get("steps", env._scene._chrono)))
-                if update_loss:
-                    training_loss.append(np.mean(update_loss))
-                update_loss = []
 
                 old_stage = curriculum.current_stage_name
                 curriculum.record_episode()
@@ -274,14 +350,22 @@ def train_sim(
 
                 if ep % 100 == 0:
                     gc.collect()
+                    step_win = max(100, window * network_update_freq)
                     mean_r = np.mean(training_rewards[-window:])
                     mean_i = np.mean(training_iterations[-window:])
-                    mean_l = np.mean(training_loss[-window:]) if training_loss else 0
+                    mean_l = np.nanmean(training_loss[-step_win:]) if training_loss else 0
+                    mean_adv = np.nanmean(training_advantage[-step_win:]) if training_advantage else 0
+                    mean_ent = np.nanmean(training_entropy[-step_win:]) if training_entropy else 0
+                    mean_q = np.nanmean(training_mean_q[-step_win:]) if training_mean_q else 0
+                    mean_td = np.nanmean(training_td_error[-step_win:]) if training_td_error else 0
+                    mean_gn = np.nanmean(training_grad_norm[-step_win:]) if training_grad_norm else 0
                     print(f"Episode {ep:5d}/{max_episodes}  "
                           f"Stage {curriculum.current_stage_name}  "
                           f"stage_episode={curriculum.stage_episode}  "
                           f"Steps {step_count:7d}  "
-                          f"Mean R {mean_r:8.2f}  Mean I {mean_i:.2f}  Mean L {mean_l:.2f}")
+                          f"Mean R {mean_r:8.2f}  Mean I {mean_i:.2f}  Mean L {mean_l:.2f}  "
+                          f"Adv {mean_adv:+.3f}  Ent {mean_ent:.3f}  "
+                          f"Qmean {mean_q:+.2f}  |TD| {mean_td:.3f}  |grad| {mean_gn:.3f}")
 
                 if plot_freq and ep % plot_freq == 0:
                     _save_training_artifacts(
@@ -289,6 +373,15 @@ def train_sim(
                         training_rewards,
                         training_iterations,
                         training_loss,
+                        training_advantage=training_advantage,
+                        training_entropy=training_entropy,
+                        training_mean_q=training_mean_q,
+                        training_max_q=training_max_q,
+                        training_td_error=training_td_error,
+                        training_grad_norm=training_grad_norm,
+                        training_q_wait=training_q_wait,
+                        training_delta_mean=training_delta_mean,
+                        training_delta_max=training_delta_max,
                         plot_callback=plot_callback,
                     )
 
@@ -300,11 +393,19 @@ def train_sim(
                     env.apply_stage(curriculum.current_stage)
                     target_network.load_state_dict(network.state_dict())
                     stage_burn_in = _stage_burn_in(curriculum.current_stage, burn_in)
-                    buffer = ReplayBuffer(
-                        memory_size=buffer_size,
-                        burn_in=stage_burn_in,
-                    )
-                    s_0, step_count, stopped = _burn_in_stage(
+                    if use_per:
+                        buffer = PrioritizedReplayBuffer(
+                            memory_size=buffer_size,
+                            burn_in=stage_burn_in,
+                            alpha=per_alpha,
+                            epsilon=per_epsilon,
+                        )
+                    else:
+                        buffer = ReplayBuffer(
+                            memory_size=buffer_size,
+                            burn_in=stage_burn_in,
+                        )
+                    s_0, mask, step_count, stopped = _burn_in_stage(
                         env,
                         buffer,
                         step_count=step_count,
@@ -315,6 +416,7 @@ def train_sim(
                         break
                 else:
                     s_0 = transform_observation(env.reset())
+                    mask = np.array(env.mask_available_actions())
 
     if stop_requested:
         print(f"Training stopped at episode {ep}, step {step_count}.")
@@ -327,6 +429,15 @@ def train_sim(
         training_rewards,
         training_iterations,
         training_loss,
+        training_advantage=training_advantage,
+        training_entropy=training_entropy,
+        training_mean_q=training_mean_q,
+        training_max_q=training_max_q,
+        training_td_error=training_td_error,
+        training_grad_norm=training_grad_norm,
+        training_q_wait=training_q_wait,
+        training_delta_mean=training_delta_mean,
+        training_delta_max=training_delta_max,
         plot_callback=plot_callback,
     )
     print("Training complete.")
@@ -351,6 +462,15 @@ def train_sim(
             training_rewards,
             training_iterations,
             training_loss,
+            training_advantage=training_advantage,
+            training_entropy=training_entropy,
+            training_mean_q=training_mean_q,
+            training_max_q=training_max_q,
+            training_td_error=training_td_error,
+            training_grad_norm=training_grad_norm,
+            training_q_wait=training_q_wait,
+            training_delta_mean=training_delta_mean,
+            training_delta_max=training_delta_max,
             plot_callback=plot_callback,
         )
 
@@ -368,12 +488,16 @@ def _print_config(**cfg):
     print(f"{sep}")
     print(f"  {'Device:':24s} {cfg['device'].upper()}")
     print(f"  {'Network:':24s} {cfg['network_type']} ({cfg['network_params']:,} params)")
+    sizes = cfg.get('hidden_sizes')
+    if sizes:
+        print(f"  {'Hidden sizes:':24s} {sizes}")
     print(f"  {'Max episodes:':24s} {cfg['max_episodes']}")
     print(f"  {'Buffer size:':24s} {cfg['buffer_size']}")
     print(f"  {'Burn-in steps:':24s} {cfg['burn_in']}")
     print(f"  {'Batch size:':24s} {cfg['batch_size']}")
     print(f"  {'Gamma:':24s} {cfg['gamma']}")
     print(f"  {'Learning rate:':24s} {cfg['lr']}")
+    print(f"  {'Max grad norm:':24s} {cfg['max_grad_norm']}")
     print(f"  {'Network update freq:':24s} {cfg['network_update_freq']} steps")
     print(f"  {'Network sync freq:':24s} {cfg['network_sync_freq']} steps")
     print(f"  {'Epsilon decay:':24s} {cfg['epsilon_decay']}")
@@ -404,6 +528,7 @@ def _save_run_metadata(
     batch_size,
     gamma,
     lr,
+    max_grad_norm,
     network_update_freq,
     network_sync_freq,
     eval_config,
@@ -441,6 +566,7 @@ def _save_run_metadata(
             "batch_size": int(batch_size),
             "gamma": float(gamma),
             "lr": float(lr),
+            "max_grad_norm": float(max_grad_norm),
             "network_update_freq": int(network_update_freq),
             "network_sync_freq": int(network_sync_freq),
         },
@@ -482,11 +608,24 @@ def _copy_if_exists(src, dst):
 
 
 def _network_hidden_sizes(network):
-    linears = [
-        module for module in network.network
-        if isinstance(module, torch.nn.Linear)
-    ]
-    return [int(layer.out_features) for layer in linears[:-1]]
+    """Extract hidden layer sizes from a DDQN network.
+
+    Handles both plain ``nn.Sequential`` (``self.network``) and
+    Differential / Dueling architectures (``self.trunk``).
+    """
+    sequential = getattr(network, "network", None)
+    if sequential is not None:
+        source = sequential
+        # Standard MLP: last Linear is the output layer → exclude it
+        linears = [m for m in source if isinstance(m, torch.nn.Linear)]
+        return [int(layer.out_features) for layer in linears[:-1]]
+    else:
+        source = getattr(network, "trunk", None)
+    if source is None:
+        return []
+    # Trunk-only architectures (Differential, Dueling): no output layer in trunk
+    linears = [m for m in source if isinstance(m, torch.nn.Linear)]
+    return [int(layer.out_features) for layer in linears]
 
 
 def _git_info(project_root):
@@ -535,23 +674,25 @@ def _jsonable(value):
 def _burn_in_stage(env, buffer, *, step_count, stage_name, stop_requested):
     print(f"Burn-in ({buffer.burn_in} steps, stage={stage_name})...")
     state = transform_observation(env.reset())
+    mask = np.array(env.mask_available_actions())  # initial mask
     while buffer.burn_in_capacity() < 1 and not stop_requested():
-        mask = np.array(env.mask_available_actions())
         if np.random.random() < 0.5:
             action = env.wait_action
         else:
             action = np.random.choice(np.arange(env.action_space.n)[mask])
-        next_state, reward, done, _ = env.step(action)
+        next_state, reward, done, info = env.step(action)
         next_state = transform_observation(next_state)
-        next_mask = np.array(env.mask_available_actions())
+        next_mask = info.get("mask", env.mask_available_actions())
         buffer.append(state, action, reward, done, next_state, mask, next_mask)
-        state = next_state.copy()
+        state = next_state  # transform_observation already copied
+        mask = next_mask      # carry forward to next iteration
         if done:
             state = transform_observation(env.reset())
+            mask = np.array(env.mask_available_actions())  # fresh mask after reset
         step_count += 1
-    print(f"Burn-in done. Buffer: {len(buffer.replay_memory)}  "
+    print(f"Burn-in done. Buffer: {len(buffer)}  "
           f"(steps so far: {step_count})")
-    return state, step_count, bool(stop_requested())
+    return state, mask, step_count, bool(stop_requested())
 
 
 def _stage_burn_in(stage, fallback):
@@ -615,6 +756,15 @@ def _save_training_checkpoint(
     training_rewards,
     training_iterations,
     training_loss,
+    training_advantage=None,
+    training_entropy=None,
+    training_mean_q=None,
+    training_max_q=None,
+    training_td_error=None,
+    training_grad_norm=None,
+    training_q_wait=None,
+    training_delta_mean=None,
+    training_delta_max=None,
     plot_callback=None,
 ):
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -625,6 +775,15 @@ def _save_training_checkpoint(
         training_rewards,
         training_iterations,
         training_loss,
+        training_advantage=training_advantage,
+        training_entropy=training_entropy,
+        training_mean_q=training_mean_q,
+        training_max_q=training_max_q,
+        training_td_error=training_td_error,
+        training_grad_norm=training_grad_norm,
+        training_q_wait=training_q_wait,
+        training_delta_mean=training_delta_mean,
+        training_delta_max=training_delta_max,
         plot_callback=plot_callback,
     )
 
@@ -634,6 +793,15 @@ def _save_training_artifacts(
     training_rewards,
     training_iterations,
     training_loss,
+    training_advantage=None,
+    training_entropy=None,
+    training_mean_q=None,
+    training_max_q=None,
+    training_td_error=None,
+    training_grad_norm=None,
+    training_q_wait=None,
+    training_delta_mean=None,
+    training_delta_max=None,
     plot_callback=None,
 ):
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -643,13 +811,57 @@ def _save_training_artifacts(
     np.save(save_path.replace(".pt", "_rewards.npy"), rewards)
     np.save(save_path.replace(".pt", "_iterations.npy"), iterations)
     np.save(save_path.replace(".pt", "_loss.npy"), loss)
+    for name, data in [
+        ("advantage", training_advantage),
+        ("entropy", training_entropy),
+        ("mean_q", training_mean_q),
+        ("max_q", training_max_q),
+        ("td_error", training_td_error),
+        ("grad_norm", training_grad_norm),
+        ("q_wait", training_q_wait),
+        ("delta_mean", training_delta_mean),
+        ("delta_max", training_delta_max),
+    ]:
+        if data is not None and len(data) > 0:
+            np.save(
+                save_path.replace(".pt", f"_{name}.npy"),
+                np.array(data),
+            )
     if plot_callback is not None:
-        plot_callback(save_path, rewards, iterations, loss)
+        plot_callback(
+            save_path,
+            rewards, iterations, loss,
+            advantage=np.array(training_advantage) if training_advantage else None,
+            entropy=np.array(training_entropy) if training_entropy else None,
+            mean_q=np.array(training_mean_q) if training_mean_q else None,
+            max_q=np.array(training_max_q) if training_max_q else None,
+            td_error=np.array(training_td_error) if training_td_error else None,
+            grad_norm=np.array(training_grad_norm) if training_grad_norm else None,
+            q_wait=np.array(training_q_wait) if training_q_wait else None,
+            delta_mean=np.array(training_delta_mean) if training_delta_mean else None,
+            delta_max=np.array(training_delta_max) if training_delta_max else None,
+        )
 
 
-def _default_save_path(algo, filename):
+def _build_config_tag(use_factored=False, use_differential=False,
+                      use_per=False, hidden_sizes=None):
+    """Build a short directory tag from config options for run identification."""
+    parts = []
+    hs = hidden_sizes or [2048, 2048]
+    parts.append("h" + "-".join(str(h) for h in hs))
+    if use_factored:
+        parts.append("fact")
+    elif use_differential:
+        parts.append("diff")
+    if use_per:
+        parts.append("per")
+    return "_".join(parts)
+
+
+def _default_save_path(algo, filename, tag=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join("saved", algo, timestamp, filename)
+    folder = timestamp if tag is None else f"{timestamp}_{tag}"
+    return os.path.join("saved", algo, folder, filename)
 
 
 def _run_and_save_eval(

@@ -53,7 +53,8 @@ class LivePlotter:
         self.update_freq = update_freq
         self.max_episodes = max_episodes
         self._last_update = -1
-        self._epsilon = 1.0  # updated from outside
+        self._has_data = False  # True after at least one successful update
+        self._epsilon = 1.0    # updated from outside
         self._setup_figure()
 
     # ── figure setup ──────────────────────────────────────────────────────
@@ -75,11 +76,12 @@ class LivePlotter:
         """
         if episode - self._last_update < self.update_freq:
             return
-        self._last_update = episode
 
         d = self._extract_data(stats)
         if d is None:
             return
+
+        self._last_update = episode
 
         # ── title bar ──────────────────────────────────────────────────
         self.fig.suptitle(
@@ -101,7 +103,8 @@ class LivePlotter:
         self._plot_metric(0, 1, d["loss"], "Training Loss (MSE)",
                           "Update Step", "Loss", color="tab:red")
 
-        self._plot_q_values(0, 2, d["q_mean"], d["q_max"])
+        self._plot_q_values(0, 2, d["q_mean"], d["q_max"],
+                           d["q_wait"], d["delta_mean"], d["delta_max"])
 
         self._plot_metric(0, 3, d["td_error"], "TD Error",
                           "Update Step", "|TD Error|", color="tab:purple")
@@ -141,12 +144,19 @@ class LivePlotter:
         os.makedirs(os.path.dirname(self.save_path) or ".", exist_ok=True)
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         self.fig.savefig(self.save_path, dpi=120, bbox_inches="tight")
+        self._has_data = True
         print(f"[dashboard] saved → {self.save_path}  (ep {episode})", flush=True)
 
     def keep_open(self):
-        """Save final snapshot and close the figure."""
-        self.fig.savefig(self.save_path, dpi=120, bbox_inches="tight")
-        print(f"[dashboard] final → {self.save_path}", flush=True)
+        """Save final snapshot and close the figure.
+
+        Only overwrites the save_path if at least one successful update
+        has occurred, preventing an empty figure from clobbering a
+        previous run's dashboard.
+        """
+        if self._has_data:
+            self.fig.savefig(self.save_path, dpi=120, bbox_inches="tight")
+            print(f"[dashboard] final → {self.save_path}", flush=True)
         plt.close(self.fig)
 
     # ── data extraction ──────────────────────────────────────────────────
@@ -160,6 +170,9 @@ class LivePlotter:
             grad_norm = self._to_array(stats.training_grad_norm)
             q_mean = self._to_array(stats.training_mean_q)
             q_max = self._to_array(stats.training_max_q)
+            q_wait = self._to_array(stats.training_q_wait)
+            delta_mean = self._to_array(stats.training_delta_mean)
+            delta_max = self._to_array(stats.training_delta_max)
             td_error = self._to_array(stats.training_td_errors)
             mean_rewards_list = self._to_array(stats.mean_training_rewards)
             epsilon_hist = self._to_array(getattr(stats, "training_epsilons", None))
@@ -182,6 +195,9 @@ class LivePlotter:
                 "grad_norm": grad_norm,
                 "q_mean": q_mean,
                 "q_max": q_max,
+                "q_wait": q_wait,
+                "delta_mean": delta_mean,
+                "delta_max": delta_max,
                 "td_error": td_error,
                 "epsilon_hist": epsilon_hist,
                 "mean_rewards_list": mean_rewards_list,
@@ -231,11 +247,10 @@ class LivePlotter:
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(xlabel, fontsize=9)
         ax.set_ylabel(ylabel, fontsize=9)
-        ax.set_xlim(0, max(len(data), self.max_episodes))
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3)
 
-    def _plot_q_values(self, row, col, q_mean, q_max):
+    def _plot_q_values(self, row, col, q_mean, q_max, q_wait, delta_mean, delta_max):
         ax = self.axes[row, col]
         ax.clear()
         has_data = False
@@ -249,14 +264,43 @@ class LivePlotter:
             ax.plot(sx, sy, color="tab:orange", linewidth=1.8,
                     label=f"Max Q (MA{self.window})")
             has_data = True
+        # ── Q(wait): baseline "do nothing" value (always shown) ──
+        if q_wait is not None and len(q_wait) > 0:
+            sx, sy = _rolling_mean(q_wait, self.window)
+            ax.plot(sx, sy, color="tab:green", linewidth=1.5, linestyle="--",
+                    label=f"Q(wait) (MA{self.window})")
+            has_data = True
+        # ── Δ mean: average advantage over waiting ──
+        if delta_mean is not None and len(delta_mean) > 0:
+            sx, sy = _rolling_mean(delta_mean, self.window)
+            ax.plot(sx, sy, color="tab:red", linewidth=1.5, linestyle=":",
+                    label=f"Δ mean (MA{self.window})")
+            ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
+            has_data = True
+        # ── Δ max: best action advantage over waiting ──
+        if delta_max is not None and len(delta_max) > 0:
+            sx, sy = _rolling_mean(delta_max, self.window)
+            ax.plot(sx, sy, color="tab:purple", linewidth=1.2, linestyle="-.",
+                    label=f"Δ max (MA{self.window})")
+            has_data = True
         if not has_data:
             ax.text(0.5, 0.5, "No data yet", transform=ax.transAxes,
                     ha="center", va="center", fontsize=10, color="gray")
-        ax.set_title("Q-Value Statistics", fontsize=11, fontweight="bold")
+        # ── Diagnostic gap annotation ──
+        if all(v is not None and len(v) > 0 for v in (q_mean, q_wait)):
+            latest_mean = q_mean[-1]
+            latest_wait = q_wait[-1]
+            gap = latest_mean - latest_wait
+            ax.text(0.98, 0.02,
+                    f"gap(MeanQ−Qwait)={gap:+.4f}",
+                    transform=ax.transAxes, ha="right", va="bottom",
+                    fontsize=7, color="gray",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
+        ax.set_title("Q-Value & Differential Statistics", fontsize=11, fontweight="bold")
         ax.set_xlabel("Update Step", fontsize=9)
         ax.set_ylabel("Q-Value", fontsize=9)
         ax.tick_params(labelsize=8)
-        self._safe_legend(ax, fontsize=7, loc="best")
+        self._safe_legend(ax, fontsize=6, loc="best")
         ax.grid(True, alpha=0.3)
 
     def _plot_epsilon(self, row, col, eps_hist):
@@ -289,7 +333,6 @@ class LivePlotter:
         ax.set_ylabel(ylabel, fontsize=9)
         ax.tick_params(labelsize=8)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, self.max_episodes)
 
     def _plot_log_loss(self, row, col, loss):
         ax = self.axes[row, col]

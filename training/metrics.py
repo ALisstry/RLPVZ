@@ -38,6 +38,9 @@ class TrainingSnapshot:
     entropy_values: list[float] = field(default_factory=list)
     advantage_values: list[float] = field(default_factory=list)
     grad_norm_values: list[float] = field(default_factory=list)
+    q_wait_values: list[float] = field(default_factory=list)
+    delta_mean_values: list[float] = field(default_factory=list)
+    delta_max_values: list[float] = field(default_factory=list)
     force: bool = False
 
 
@@ -187,6 +190,9 @@ def load_training_snapshot(path: str) -> TrainingSnapshot | None:
         entropy_values=[float(value) for value in raw.get("entropy_values", [])],
         advantage_values=[float(value) for value in raw.get("advantage_values", [])],
         grad_norm_values=[float(value) for value in raw.get("grad_norm_values", [])],
+        q_wait_values=[float(value) for value in raw.get("q_wait_values", [])],
+        delta_mean_values=[float(value) for value in raw.get("delta_mean_values", [])],
+        delta_max_values=[float(value) for value in raw.get("delta_max_values", [])],
         force=bool(raw.get("force", False)),
     )
 

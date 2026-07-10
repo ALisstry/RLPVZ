@@ -1,10 +1,11 @@
 import argparse
 import csv
 import json
+import multiprocessing as mp
 import os
+import queue
 import random
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from benchmark_plots import generate_benchmark_plots
@@ -57,6 +58,7 @@ def _random_worker_run(
     start_index,
     total_episodes,
     worker_id,
+    stop_event=None,
 ):
     """Run random-eval episodes on a single game instance (used by workers)."""
     env = None
@@ -69,21 +71,82 @@ def _random_worker_run(
             env_spec=env_spec,
             scenario_spec=scenario_spec,
         )
+        _wait_idx = env.action_space.n - 1
         for i in range(num_episodes):
+            if stop_event and stop_event.is_set():
+                break
             state = env.reset()
             done = False
             total_reward = 0.0
             actions = 0
             info = {}
+            _wait_choice = 0   # 能种却选了 wait
+            _wait_forced = 0   # 只能 wait
+            _ep_step_times = []  # 记录每步耗时用于诊断
+            _ep_gaps = []        # 记录相邻 step 完成的时间间隔
+            _prev_done_ts = __import__("time").time()  # 上一轮 step 完成的时间戳
             while not done:
+                if stop_event and stop_event.is_set():
+                    break
                 mask = env.mask_available_actions()
                 valid_actions = [j for j, m in enumerate(mask) if m > 0]
-                action = random.choice(valid_actions) if valid_actions else 0
+                if valid_actions:
+                    action = random.choice(valid_actions)
+                else:
+                    # mask 全为零时的安全兜底（正常不应发生，wait 始终可用）
+                    action = len(mask) - 1 if len(mask) > 0 else 0
+                    import numpy as _np
+                    _mask_arr = _np.asarray(mask)
+                    print(
+                        f"[Benchmark][Random][W{worker_id}] WARNING: "
+                        f"truly empty action mask at episode "
+                        f"{start_index + i + 1} step {actions} | "
+                        f"mask_len={len(mask)} mask_sum={_mask_arr.sum()} "
+                        f"mask_dtype={type(mask).__name__} "
+                        f"fallback_action={action}",
+                        flush=True,
+                    )
+                if action == _wait_idx:
+                    _has_nonwait = any(mask[:-1]) if len(mask) > 1 else False
+                    if _has_nonwait:
+                        _wait_choice += 1
+                    else:
+                        _wait_forced += 1
+                _t0 = __import__("time").time()
                 state, reward, done, info = env.step(action)
+                _dt = __import__("time").time() - _t0
+                _ep_step_times.append(_dt)
+
+                # 距离上次 step 完成的时间差（包含本步耗时 + 动作选择开销）
+                _now = __import__("time").time()
+                _gap = _now - _prev_done_ts
+                _ep_gaps.append(_gap)
+                _prev_done_ts = _now
+
+                if _dt > 1.0:
+                    print(
+                        f"[Benchmark][Random][W{worker_id}] SLOW STEP "
+                        f"ep={start_index + i + 1}/{total_episodes} "
+                        f"step={actions} dt={_dt:.2f}s gap={_gap:.2f}s "
+                        f"action={action} n_valid={len(valid_actions)}",
+                        flush=True,
+                    )
                 total_reward += float(reward)
                 actions += 1
 
             episode_index = start_index + i + 1
+            _step_timing = {
+                "total_sec": float(sum(_ep_step_times)),
+                "max_sec": float(max(_ep_step_times)) if _ep_step_times else 0.0,
+                "max_gap_sec": float(max(_ep_gaps)) if _ep_gaps else 0.0,
+                "slow_steps": sum(1 for t in _ep_step_times if t > 1.0),
+                "mean_sec": float(sum(_ep_step_times) / len(_ep_step_times))
+                if _ep_step_times else 0.0,
+                "wait_choice": _wait_choice,
+                "wait_forced": _wait_forced,
+            }
+            _diag = dict(info.get("diagnostics", {}))
+            _diag["step_timing"] = _step_timing
             details.append(
                 EpisodeEvalResult(
                     eval_id="",
@@ -108,22 +171,63 @@ def _random_worker_run(
                             "sublevel_cleared_this_step"
                         ),
                         "plant_stats": info.get("plant_stats", {}),
-                        "diagnostics": info.get("diagnostics", {}),
+                        "diagnostics": _diag,
                     },
                 )
             )
+            _st = _step_timing
             print(
                 f"[Benchmark][Random][W{worker_id}] episode {episode_index}/{total_episodes} | "
                 f"reward={total_reward:.2f} | "
                 f"survival={details[-1].survival:.0f} | "
                 f"win={details[-1].win} | "
-                f"actions={actions}",
+                f"actions={actions} | "
+                f"wait(choice={_wait_choice}, forced={_wait_forced}) | "
+                f"max_gap={_st['max_gap_sec']:.2f}s | "
+                f"step_time(total={_st['total_sec']:.1f}s, max={_st['max_sec']:.2f}s, "
+                f"slow={_st['slow_steps']}, mean={_st['mean_sec']*1000:.0f}ms)",
                 flush=True,
             )
     finally:
         if env is not None and hasattr(env, "close"):
             env.close()
     return details
+
+
+def _random_worker_proc(
+    result_queue,
+    stop_event,
+    args,
+    instance,
+    env_spec,
+    scenario_spec,
+    num_episodes,
+    start_index,
+    total_episodes,
+    worker_id,
+):
+    """Multiprocessing worker target — wraps _random_worker_run.
+
+    Puts ``("ok", details)`` or ``("error", (worker_id, msg))`` into
+    *result_queue* so the main process can collect results.
+    """
+    try:
+        details = _random_worker_run(
+            args=args,
+            instance=instance,
+            env_spec=env_spec,
+            scenario_spec=scenario_spec,
+            num_episodes=num_episodes,
+            start_index=start_index,
+            total_episodes=total_episodes,
+            worker_id=worker_id,
+            stop_event=stop_event,
+        )
+        result_queue.put(("ok", details))
+    except KeyboardInterrupt:
+        pass  # 被主进程终止，静默退出
+    except Exception as exc:
+        result_queue.put(("error", (worker_id, repr(exc))))
 
 
 def evaluate_random(
@@ -136,8 +240,9 @@ def evaluate_random(
 ):
     """Evaluate with uniformly random actions (respecting action masks).
 
-    When *num_workers* > 1, episodes are distributed across parallel
-    threads, each driving its own game instance.
+    Uses *multiprocessing.Process* workers (same pattern as training) so
+    that Ctrl+C can terminate stuck workers immediately via
+    ``Process.terminate()``.
     """
     if not instances:
         raise ValueError("Random eval requires at least one game instance")
@@ -149,44 +254,79 @@ def evaluate_random(
     episode_splits = _split_episodes(episodes, num_workers)
     actual_workers = len(episode_splits)
 
-    all_details = []
-    if actual_workers == 1:
-        start_idx, count = episode_splits[0]
-        all_details = _random_worker_run(
-            args=args,
-            instance=instances[0],
-            env_spec=env_spec,
-            scenario_spec=scenario_spec,
-            num_episodes=count,
-            start_index=start_idx,
-            total_episodes=episodes,
-            worker_id=0,
+    ctx = mp.get_context("spawn")
+    stop_event = ctx.Event()
+    result_queue = ctx.Queue()
+
+    print(
+        f"[Benchmark][Random] Dispatching {episodes} episodes "
+        f"across {actual_workers} workers (multiprocessing)"
+    )
+
+    processes = []
+    for worker_id, (start_idx, count) in enumerate(episode_splits):
+        p = ctx.Process(
+            target=_random_worker_proc,
+            args=(
+                result_queue,
+                stop_event,
+                args,
+                instances[worker_id],
+                env_spec,
+                scenario_spec,
+                count,
+                start_idx,
+                episodes,
+                worker_id,
+            ),
         )
-    else:
+        p.start()
+        processes.append(p)
         print(
-            f"[Benchmark][Random] Dispatching {episodes} episodes "
-            f"across {actual_workers} parallel workers"
+            f"[Benchmark][Random] Worker {worker_id} started: "
+            f"pid={instances[worker_id]['pid']} port={instances[worker_id]['port']}"
         )
-        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-            futures = {}
-            for worker_id, (start_idx, count) in enumerate(episode_splits):
-                future = executor.submit(
-                    _random_worker_run,
-                    args=args,
-                    instance=instances[worker_id],
-                    env_spec=env_spec,
-                    scenario_spec=scenario_spec,
-                    num_episodes=count,
-                    start_index=start_idx,
-                    total_episodes=episodes,
-                    worker_id=worker_id,
+
+    all_details = []
+    completed = 0
+    try:
+        while completed < len(processes):
+            try:
+                status, data = result_queue.get(timeout=1.0)
+            except queue.Empty:
+                # 检查是否有进程异常退出
+                for p in processes:
+                    if p.exitcode is not None and p.exitcode != 0:
+                        print(
+                            f"[Benchmark][Random] Worker exited with "
+                            f"code {p.exitcode}",
+                            flush=True,
+                        )
+                continue
+            completed += 1
+            if status == "ok":
+                all_details.extend(data)
+            else:
+                wid, error = data
+                print(
+                    f"[Benchmark][Random] Worker {wid} error: {error}",
+                    flush=True,
                 )
-                futures[future] = worker_id
+    except KeyboardInterrupt:
+        print(
+            "\n[Benchmark][Random] Interrupted, stopping workers...",
+            flush=True,
+        )
+        stop_event.set()
+    finally:
+        # 对齐训练 AsyncWorkerPool.stop() 的终止流程
+        for p in processes:
+            p.join(timeout=3.0)
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=2.0)
 
-            for future in as_completed(futures):
-                all_details.extend(future.result())
-
-        all_details.sort(key=lambda d: d.episode_index)
+    all_details.sort(key=lambda d: d.episode_index)
 
     return summarize_eval_results(
         eval_id=eval_id,
@@ -215,6 +355,8 @@ def evaluate_random(
 def main(argv=None):
     eval_args, train_argv = _parse_eval_args(argv)
     args = get_args(train_argv)
+    if not hasattr(args, "speed"):
+        args.speed = 5.0
     eval_config = _load_eval_config(args)
     _apply_eval_instance_config(args, eval_args, eval_config)
 
@@ -227,6 +369,11 @@ def main(argv=None):
     episodes = eval_args.eval_episodes or 100
 
     env_spec, scenario_spec = build_base_eval_specs(args)
+    if eval_args.debug:
+        from dataclasses import replace
+        scenario_spec = replace(scenario_spec, initial_sun=5000)
+        args.initial_sun = 5000
+        print("[Benchmark] DEBUG mode: initial_sun=5000", flush=True)
     _print_eval_metadata(
         args=args,
         model_path=model_path,
@@ -276,6 +423,9 @@ def main(argv=None):
             raise NotImplementedError(
                 f"Offline evaluate is not implemented for algo: {args.algo}"
             )
+    except KeyboardInterrupt:
+        print("\n[Benchmark] Interrupted by user", flush=True)
+        return
     finally:
         terminate_pvz_processes(instances, auto_start=args.auto_start)
 
@@ -344,6 +494,12 @@ def _parse_eval_args(argv=None):
         type=int,
         default=1,
         help="Number of parallel workers for evaluation (requires multiple game instances)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Debug mode: initial sun=5000, verbose logging",
     )
     eval_args, train_argv = parser.parse_known_args(argv)
     if eval_args.algo:
@@ -445,6 +601,13 @@ def _write_diagnostics(result, output_dir):
         "sun_gained",
         "sun_spent",
         "wait_with_high_sun",
+        "step_total_sec",
+        "step_max_sec",
+        "step_max_gap_sec",
+        "step_slow_count",
+        "step_mean_sec",
+        "wait_choice",
+        "wait_forced",
         "reward_breakdown",
     ]
     with open(csv_path, "w", encoding="utf-8", newline="") as file:
@@ -532,6 +695,10 @@ def _print_eval_diagnostics(result):
             f"invalid={int(item.get('invalid_actions', 0))})  "
             f"killed={int(item.get('zombies_killed', 0))}  "
             f"lost={int(item.get('plants_lost', 0))}  "
+            f"step_time(total={float(item.get('step_total_sec', 0)):.1f}s, "
+            f"max={float(item.get('step_max_sec', 0)):.2f}s, "
+            f"gap={float(item.get('step_max_gap_sec', 0)):.2f}s, "
+            f"slow={int(item.get('step_slow_count', 0))})  "
             f"rewards={_format_top_items(item.get('reward_breakdown', {}), precision=1)}"
         )
 

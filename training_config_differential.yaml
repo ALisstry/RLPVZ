@@ -1,0 +1,192 @@
+# PVZ AI Differential Q-Network Training Configuration
+# Dense reward: zombie HP reduction per step (zombie_damage).
+# Differential architecture: Q(s,a) = Q(s,wait) + Δ(s,a), Δ(s,wait) ≡ 0.
+#
+# This variant encodes the prior that "wait" is the default action in PvZ.
+# The network learns a baseline Q(s,wait) and action advantages Δ(s,a),
+# answering "how much better is this action than doing nothing?"
+#
+# Usage:
+#   .\.venv\Scripts\python.exe train.py --training_config training_config_differential.yaml
+
+# =============================================================================
+# Game Settings — Survival: Day (Hard)
+# =============================================================================
+game:
+  game_mode_id: 6                # GAMEMODE_SURVIVAL_HARD_DAY = 生存白天(困难)
+  rows: 5                        # 5 rows
+  cols: 9                        # 9 columns
+  initial_sun: 50
+
+# =============================================================================
+# Card Loadout — exactly matching paper Table 4
+# =============================================================================
+cards:
+  slot_count: 10
+
+  plants:
+    # Slot 0: Sunflower (economy)
+    - slot: 0
+      id: 1
+      name: "Sunflower"
+      cost: 50
+
+    # Slot 1: Peashooter (basic offense)
+    - slot: 1
+      id: 0
+      name: "Peashooter"
+      cost: 100
+
+    # Slot 2: Potato Mine (trap)
+    - slot: 2
+      id: 4
+      name: "Potato Mine"
+      cost: 25
+
+    # Slot 3: Wall-nut (defense)
+    - slot: 3
+      id: 3
+      name: "Wall-nut"
+      cost: 50
+
+    # Slot 4: Repeater (double damage)
+    - slot: 4
+      id: 7
+      name: "Repeater"
+      cost: 200
+
+    # Slot 5: Squash (instant kill)
+    - slot: 5
+      id: 17
+      name: "Squash"
+      cost: 50
+
+    # Slot 6: Cherry Bomb (AOE instant)
+    - slot: 6
+      id: 2
+      name: "Cherry Bomb"
+      cost: 150
+
+    # Slot 7: Snow Pea (slow)
+    - slot: 7
+      id: 5
+      name: "Snow Pea"
+      cost: 175
+
+    # Slot 8: Melon-pult (AOE damage)
+    - slot: 8
+      id: 39
+      name: "Melon-pult"
+      cost: 300
+
+    # Slot 9: Spikeweed (ground trap)
+    - slot: 9
+      id: 21
+      name: "Spikeweed"
+      cost: 100
+
+# =============================================================================
+# Action Space — 10 cards × 5 rows × 9 cols + 1 wait = 451
+# =============================================================================
+action_space:
+  size: 451
+
+  structure:
+    plant_actions: 450          # 10 cards × 45 cells
+    shovel_actions: 0           # disabled
+    wait_action: 1
+
+# =============================================================================
+# Observation Space — Paper-format 596-dim flat vector
+#
+#   sun count           :  1 dim
+#   card cooldowns      : 10 dim
+#   plant type one-hot  : 5×9×(10+1) = 495 dim
+#   plant HP grid       : 5×9 = 45 dim
+#   zombie HP grid      : 5×9 = 45 dim
+#   ─────────────────────────────────────────────
+#   Total               : 596 dim
+# =============================================================================
+observation_space:
+  grid:
+    shape: [5, 9, 13]           # 5 rows × 9 cols × 13 channels
+
+  global:
+    total_dim: 61
+
+  card_attributes:
+    shape: [10, 7]
+
+# =============================================================================
+# Reward — zombie_damage only (dense reward)
+# =============================================================================
+rewards:
+  reward_scale: 1
+  plant_lost_sun_cost_scale: 0.0
+  invalid_action: 0.0
+  wait_with_sun: 0.0
+  game_win: 0.0
+  game_lose: 0.0
+
+# =============================================================================
+# Training Configuration — Differential Q-Network variant
+#
+# Key difference from baseline:
+#   use_differential: true   ←  Q(s,a) = Q(s,wait) + Δ(s,a)
+#
+# The network splits after the first hidden layer:
+#   596 → 2048 ─┬─ wait_head(2048)  → Q(s,wait) ∈ R
+#               └─ delta_head(2048) → Δ(s,a) ∈ R^{451}, Δ(s,wait) ≡ 0
+#
+# Dashboard panel (0,2) shows Q(wait) and Δ statistics in addition
+# to standard mean/max Q values.
+# =============================================================================
+training:
+  args:
+    algo: "ddqn"
+    port: 12345
+    num_envs: 1
+    base_port: 12345
+    ports: ""
+    pids: ""
+    auto_start: true
+    launch_toolkit: false
+    game_path: "gameobj/PlantsVsZombies.exe"
+    wait_time: 3.0
+    speed: 10.0
+    frameskip: 49
+    auto_resume: false
+    env_console_log_level: 0
+    file_log_level: 1
+    execution: "async_worker_pool"
+    curriculum: "none"
+
+  ddqn:
+    ddqn_episodes: 10000
+    ddqn_gamma: 0.99
+    ddqn_batch_size: 512
+    ddqn_buffer_size: 100000
+    ddqn_burn_in: 10000
+    ddqn_lr: 0.0001
+    ddqn_update_freq: 32
+    ddqn_sync_freq: 2000
+    ddqn_checkpoint_freq: 500
+    ddqn_plot_freq: 50
+    ddqn_plot_path: null
+    ddqn_save_path: null
+    ddqn_load_path: null
+
+    # Differential Q-Network architecture: shared trunk → wait + delta heads
+    ddqn_hidden_sizes: [2048, 2048]
+    use_differential: true         # Q(s,a) = Q(s,wait) + Δ(s,a), Δ(s,wait) ≡ 0
+
+  # 定期评估
+  eval:
+    enabled: true
+    freq_episodes: 1000
+    episodes: 50
+    deterministic: true
+    save_episode_details: true
+
+  env:
+    max_steps: 10000

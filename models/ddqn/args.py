@@ -86,3 +86,28 @@ def add_args(group):
         default=argparse.SUPPRESS,
         help="PER small positive constant to avoid zero priority (default 1e-6)",
     )
+    # ── Differential Q-Network ──
+    group.add_argument(
+        "--use_differential",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Use Differential Q-Network: Q(s,a) = Q(s,wait) + Δ(s,a), Δ(s,wait) ≡ 0",
+    )
+    group.add_argument(
+        "--use_cnn",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Use CNN-based Q-Network with dual-branch grid processing",
+    )
+    group.add_argument(
+        "--use_dueling",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Use Dueling DQN architecture (Wang et al., 2016)",
+    )
+    group.add_argument(
+        "--use_factored",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Use factored action heads in CNN Q-Network",
+    )

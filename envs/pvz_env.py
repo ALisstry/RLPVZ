@@ -747,10 +747,18 @@ class PVZEnv(gym.Env):
 
         # 检查当前UI状态
         ui = self.hook_client.get_ui()
+        self._emit(
+            f"[PVZEnv] reset: initial UI={ui} (port={self.hook_port})",
+            console_level=2, log_level=1,
+        )
 
         # 显式处理结算画面：无论胜负，都先退回主菜单
         # step() 中的 _handle_game_failure 可能未运行或未覆盖所有情况
         if ui in (4, 5):  # ZOMBIES_WON / AWARD
+            self._emit(
+                f"[PVZEnv] reset: handling end-of-game UI={ui} (port={self.hook_port})",
+                console_level=1, log_level=1,
+            )
             if ui == 4:
                 self._dismiss_zombie_won()
                 ui = self.hook_client.get_ui()
@@ -1101,7 +1109,26 @@ class PVZEnv(gym.Env):
             
             # 检查终止条件
             terminated, win = self._check_terminated(game_state)
-            
+
+            # ── 兜底：用 UI 状态检测 _check_terminated 漏掉的 game-over ──
+            # 僵尸进屋后可能已从 game_state.zombies 中消失，导致
+            # _check_terminated 无法检测到失败。此时游戏 UI 已经是
+            # ZOMBIES_WON (4) 或 AWARD (5) 结算画面，以此兜底判定。
+            if not terminated and self.hook_client:
+                ui = self.hook_client.get_ui()
+                if ui == 4:  # ZOMBIES_WON
+                    self._emit(
+                        "[PVZEnv] UI=4 (ZOMBIES_WON) 兜底检测到失败",
+                        console_level=2, log_level=1,
+                    )
+                    terminated, win = True, False
+                elif ui == 5:  # AWARD (胜利画面)
+                    self._emit(
+                        "[PVZEnv] UI=5 (AWARD) 兜底检测到胜利",
+                        console_level=2, log_level=1,
+                    )
+                    terminated, win = True, True
+
             if terminated:
                 self._episode_win = win  # 记录胜负
                 # 通知其他 env 降速，减少本轮阻塞期间的游戏偏离
@@ -1572,17 +1599,39 @@ class PVZEnv(gym.Env):
 
     def _dismiss_zombie_won(self):
         """等待 ZOMBIES_WON 动画播完 → 点击 (400,400) → back_to_main → 重启。"""
-        time.sleep(5.0)
-        for _ in range(10):
+        self._emit(
+            f"[PVZEnv] _dismiss_zombie_won: UI=4 detected (port={self.hook_port})",
+            console_level=2, log_level=1,
+        )
+        time.sleep(2.0)  # 等待动画播放（缩短自 5.0）
+        for i in range(10):
             self.hook_client.click_scaled(400, 400)
-            time.sleep(0.5)
-            if self.hook_client.get_ui() != 4:
-                time.sleep(5.0)
+            time.sleep(0.3)
+            ui = self.hook_client.get_ui()
+            if ui != 4:
+                self._emit(
+                    f"[PVZEnv] _dismiss_zombie_won: UI={ui} after {i+1} clicks",
+                    console_level=2, log_level=1,
+                )
+                time.sleep(1.0)  # 等 UI 过渡稳定（缩短自 5.0）
                 return
+        # 点击无效，尝试 back_to_main
+        self._emit(
+            "[PVZEnv] _dismiss_zombie_won: clicks failed, trying back_to_main",
+            console_level=1, log_level=1,
+        )
         self.hook_client.back_to_main()
-        time.sleep(5.0)
+        time.sleep(2.0)
         if self.hook_client.get_ui() == 4:
+            self._emit(
+                "[PVZEnv] _dismiss_zombie_won: still UI=4, restarting game process",
+                console_level=1, log_level=1,
+            )
             self._restart_game_process()
+        self._emit(
+            "[PVZEnv] _dismiss_zombie_won: done",
+            console_level=2, log_level=1,
+        )
 
     def _handle_game_failure(self):
         """处理游戏失败，返回主菜单"""

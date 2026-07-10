@@ -32,8 +32,9 @@ class SimPVZEnv:
     Replaces both PVZEnv and DDQNEnvAdapter — directly outputs flat state
     vectors and provides mask_available_actions().
 
-    State vector (95 dims for 5x9 grid with 4 plants):
-      [plant_grid(45), zombie_hp_grid(45), plant_availability(4), sun_norm(1)]
+    State vector (596 dims for 5×9 grid with 10 plants):
+      [sun_norm(1), cooldowns(10), plant_onehot(495), plant_hp(45), zombie_hp(45)]
+      where plant_onehot = grid_size(45) × (num_cards(10) + 1 empty/unknown class)
     """
 
     def __init__(self, stage=None):
@@ -84,10 +85,10 @@ class SimPVZEnv:
 
         self._scene = self._new_scene()
         self._steps = 0
-        self._last_mask = None
         self._collect_render = False
         self._render_data = []  # stored per-frame render info for last episode
         self.rewards = REWARDS
+        self._use_shaped = bool(REWARDS.get("use_shaped", False))
         self._last_sun = 0
         self._last_plants = {}
         self._last_zombies = {}
@@ -95,6 +96,14 @@ class SimPVZEnv:
         self._last_potential = 0.0
         self._reward_details = {}
         self._episode_diagnostics = self._new_episode_diagnostics()
+
+        # ── Pre-allocated buffers for _build_state() ──
+        self._plant_onehot = np.zeros(
+            (self.grid_size, self.num_cards + 1), dtype=np.float32)
+        self._plant_hp = np.zeros(self.grid_size, dtype=np.float32)
+        self._zombie_hp = np.zeros(self.grid_size, dtype=np.float32)
+        self._cooldowns_buf = np.ones(self.num_cards, dtype=np.float32)
+        self._state_buf = np.zeros(self.state_dim, dtype=np.float32)
 
     @property
     def steps(self):
@@ -124,12 +133,11 @@ class SimPVZEnv:
     def reset(self, **kwargs):
         self._scene = self._new_scene()
         self._steps = 0
-        self._last_mask = self.mask_available_actions()
         self._last_sun = self._scene.sun
-        self._last_plants = self._snapshot_plants()
+        self._last_plants = self._snapshot_plants() if self._use_shaped else {}
         self._last_zombies = self._snapshot_zombies()
         self._last_wave_index = self._current_wave_index()
-        self._last_potential = self._calculate_potential()
+        self._last_potential = self._calculate_potential() if self._use_shaped else 0.0
         self._reward_details = {}
         self._episode_diagnostics = self._new_episode_diagnostics()
         if self._collect_render:
@@ -168,10 +176,11 @@ class SimPVZEnv:
             step_diagnostics,
         )
         state = self._build_state()
-        self._last_mask = self.mask_available_actions()
+        mask = self.mask_available_actions()
         self._steps += 1
         self._reward_details = details
-        info = self._build_info(episode_over, details)
+        info = self._build_info(episode_over, episode_win, details)
+        info["mask"] = mask
         return state, float(reward), bool(episode_over), info
 
     def mask_available_actions(self):
@@ -180,7 +189,6 @@ class SimPVZEnv:
         empty_cells, available_plants = self._scene.get_available_moves()
         if len(empty_cells[0]) == 0:
             return mask
-        grid_indices = empty_cells[0] * self.cols + empty_cells[1]
         for plant in available_plants:
             card_idx = self._plant_no[plant.__name__]
             if self.card_plant_ids[card_idx] not in self.enabled_plant_ids:
@@ -209,31 +217,38 @@ class SimPVZEnv:
         pass
 
     def _build_state(self):
+        """Build the 596-dim observation vector using pre-allocated buffers."""
         empty_unknown_class = self.num_cards
-        plant_onehot = np.zeros(
-            (self.grid_size, self.num_cards + 1), dtype=np.float32)
-        plant_onehot[:, empty_unknown_class] = 1.0
-        plant_hp = np.zeros(self.grid_size, dtype=np.float32)
-        zombie_hp = np.zeros(self.grid_size, dtype=np.float32)
 
+        # Reset buffers in-place (no allocations)
+        self._plant_onehot.fill(0.0)
+        self._plant_onehot[:, empty_unknown_class] = 1.0
+        self._plant_hp.fill(0.0)
+        self._zombie_hp.fill(0.0)
+        self._cooldowns_buf.fill(1.0)
+
+        # ── Plant features ──
         for plant in self._scene.plants:
             if plant.lane not in self.enabled_rows:
                 continue
             idx = plant.lane * self.cols + plant.pos
-            cls_idx = self._plant_no.get(plant.__class__.__name__, empty_unknown_class)
-            plant_onehot[idx, :] = 0.0
-            plant_onehot[idx, cls_idx] = 1.0
+            cls_idx = self._plant_no.get(
+                plant.__class__.__name__, empty_unknown_class)
+            self._plant_onehot[idx, :] = 0.0
+            self._plant_onehot[idx, cls_idx] = 1.0
             max_hp = max(1.0, float(getattr(plant, "MAX_HP", 1)))
-            plant_hp[idx] = max(0.0, min(1.0, float(plant.hp) / max_hp))
+            self._plant_hp[idx] = max(
+                0.0, min(1.0, float(plant.hp) / max_hp))
 
+        # ── Zombie HP ──
         for zombie in self._scene.zombies:
             if zombie.lane not in self.enabled_rows:
                 continue
             idx = zombie.lane * self.cols + zombie.pos
-            zombie_hp[idx] = min(
-                1.0, zombie_hp[idx] + float(zombie.hp) / ZOMBIE_HP_NORM)
+            self._zombie_hp[idx] = min(
+                1.0, self._zombie_hp[idx] + float(zombie.hp) / ZOMBIE_HP_NORM)
 
-        cooldowns = np.ones(self.num_cards, dtype=np.float32)
+        # ── Card cooldowns ──
         for i, name in enumerate(self._plant_names):
             if name not in self.plant_deck:
                 continue
@@ -241,19 +256,22 @@ class SimPVZEnv:
                 continue
             plant_cls = self.plant_deck[name]
             full_cd = max(1.0, float(plant_cls.COOLDOWN * config.FPS - 1))
-            cooldowns[i] = max(
+            self._cooldowns_buf[i] = max(
                 0.0, min(1.0, self._scene.plant_cooldowns[name] / full_cd))
 
-        return np.concatenate(
-            [
-                np.array([min(float(self._scene.sun), MAX_SUN) / MAX_SUN],
-                         dtype=np.float32),
-                cooldowns,
-                plant_onehot.reshape(-1),
-                plant_hp,
-                zombie_hp,
-            ]
-        ).astype(np.float32)
+        # ── Write into pre-allocated state buffer (no concatenation) ──
+        self._state_buf[0] = min(float(self._scene.sun), MAX_SUN) / MAX_SUN
+        offset = 1
+        self._state_buf[offset:offset + self.num_cards] = self._cooldowns_buf
+        offset += self.num_cards
+        plant_flat = self._plant_onehot.reshape(-1)
+        self._state_buf[offset:offset + plant_flat.size] = plant_flat
+        offset += plant_flat.size
+        self._state_buf[offset:offset + self._plant_hp.size] = self._plant_hp
+        offset += self._plant_hp.size
+        self._state_buf[offset:offset + self._zombie_hp.size] = self._zombie_hp
+
+        return self._state_buf
 
     def _take_action(self, action):
         if action == self.wait_action:
@@ -292,7 +310,8 @@ class SimPVZEnv:
             "plants_lost": 0,
             "sun_diff": 0,
         }
-        current_plants = self._snapshot_plants()
+        use_shaped = self._use_shaped
+        current_plants = self._snapshot_plants() if use_shaped else {}
         current_zombies = self._snapshot_zombies()
         current_wave_index = self._current_wave_index()
         damage = self._zombie_damage(current_zombies)
@@ -310,13 +329,12 @@ class SimPVZEnv:
                 reward += r_wait
                 details["wait_with_sun"] = r_wait
         elif planted_name is not None:
-            if self.rewards.get("use_shaped", False):
+            if use_shaped:
                 r_plant = self._plant_reward(planted_name)
                 if r_plant:
                     reward += r_plant
                     details["plant"] = r_plant
 
-        use_shaped = self.rewards.get("use_shaped", False)
         if use_shaped:
             r_survival = float(self.rewards.get("survival_per_step", 0.0))
             if r_survival:
@@ -364,7 +382,7 @@ class SimPVZEnv:
                     reward += r_sf
                     details["sunflower_lost"] = r_sf
 
-        potential = self._calculate_potential()
+        potential = self._calculate_potential() if use_shaped else 0.0
         if use_shaped:
             delta = max(-5.0, min(5.0, potential - self._last_potential))
             delta_scale = float(
@@ -393,15 +411,15 @@ class SimPVZEnv:
         return reward, details, step_diagnostics
 
     def _zombie_damage(self, current_zombies):
+        """Total HP lost by zombies since last step."""
         damage = 0.0
-        current_ids = set(current_zombies)
-        for entity_id, zombie in current_zombies.items():
-            previous = self._last_zombies.get(entity_id)
-            if previous is not None:
-                damage += max(0.0, float(previous["hp"]) - float(zombie["hp"]))
-        for entity_id, zombie in self._last_zombies.items():
-            if entity_id not in current_ids:
-                damage += max(0.0, float(zombie["hp"]))
+        for entity_id, hp in current_zombies.items():
+            previous_hp = self._last_zombies.get(entity_id)
+            if previous_hp is not None:
+                damage += max(0.0, float(previous_hp) - float(hp))
+        for entity_id, hp in self._last_zombies.items():
+            if entity_id not in current_zombies:
+                damage += max(0.0, float(hp))
         return damage
 
     def _new_episode_diagnostics(self):
@@ -580,15 +598,8 @@ class SimPVZEnv:
         }
 
     def _snapshot_zombies(self):
-        return {
-            zombie.entity_id: {
-                "name": zombie.__class__.__name__,
-                "lane": zombie.lane,
-                "pos": zombie.pos,
-                "hp": zombie.hp,
-            }
-            for zombie in self._scene.zombies
-        }
+        """Return {entity_id: hp} for damage-delta computation."""
+        return {zombie.entity_id: zombie.hp for zombie in self._scene.zombies}
 
     def _current_wave_index(self):
         return int(getattr(self._scene._zombie_spawner, "wave_index", 0))
@@ -602,7 +613,29 @@ class SimPVZEnv:
         return scene
 
     def _move_available(self):
-        return bool(np.any(self.mask_available_actions()[:self.wait_action]))
+        """Fast check: is at least one curriculum-valid action available?
+
+        Only iterates the plant deck (≤10 items) and checks cooldown/sun/grid
+        constraints — does NOT build the full 451-dim action mask.  The full
+        mask is computed once in ``mask_available_actions()`` when the agent
+        actually needs to choose an action.
+        """
+        if self._scene.grid.is_full():
+            return False
+        empty_rows = set(self._scene.grid.empty_cells()[0])
+        if not (empty_rows & self.enabled_rows):
+            return False
+        for plant_name, plant_cls in self.plant_deck.items():
+            cls_name = plant_cls.__name__
+            if cls_name not in self._plant_no:
+                continue
+            card_idx = self._plant_no[cls_name]
+            if self.card_plant_ids[card_idx] not in self.enabled_plant_ids:
+                continue
+            if (self._scene.plant_cooldowns[plant_name] <= 0
+                    and plant_cls.COST <= self._scene.sun):
+                return True
+        return False
 
     def _episode_status(self):
         if self._scene.lives <= 0:
@@ -628,10 +661,9 @@ class SimPVZEnv:
         spawner = self._scene._zombie_spawner
         return int(getattr(spawner, "completed_flag_waves", 0))
 
-    def _build_info(self, episode_over, reward_details):
+    def _build_info(self, episode_over, episode_win, reward_details):
         current_wave = self._current_wave_index()
         spawner = self._scene._zombie_spawner
-        _, episode_win = self._episode_status()
         return {
             "steps": min(self.timeout_frames, self._scene._chrono),
             "win": bool(episode_win),
