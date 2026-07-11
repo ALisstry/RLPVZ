@@ -10,6 +10,7 @@ Key features:
 import gc
 import os
 import signal
+import time
 from datetime import datetime
 import numpy as np
 import torch
@@ -343,6 +344,7 @@ def train_ppo(
     state = transform_observation(env.reset())
     ep = 0
     total_steps_done = 0
+    t_start = time.perf_counter()
     episode_rewards = []
     episode_lengths = []
     episode_reward = 0.0
@@ -352,6 +354,8 @@ def train_ppo(
     update_policy_losses = []
     update_value_losses = []
     update_entropies = []
+    _last_plot_ep = 0
+    _last_save_ep = 0
 
     # Periodic save + interrupt handler
     _save_freq = 10000
@@ -401,9 +405,10 @@ def train_ppo(
                 episode_reward = 0.0
                 episode_steps = 0
 
-        # Flush partial episode reward
+        # Flush partial episode
         if episode_reward > 0:
             episode_rewards.append(episode_reward)
+            episode_lengths.append(episode_steps)
 
         # ═══════════════════════════════════════════════════════════════
         # Phase 2: Compute GAE advantages and returns
@@ -453,7 +458,7 @@ def train_ppo(
         old_values_t = torch.FloatTensor(old_values).to(device)
         advantages_t = torch.FloatTensor(advantages).to(device)
         returns_t = torch.FloatTensor(returns).to(device)
-        masks_t = torch.BoolTensor(masks).to(device)
+        # Keep masks on CPU — only move mini-batch slices to GPU
 
         indices = np.arange(n)
 
@@ -463,10 +468,12 @@ def train_ppo(
             for start in range(0, n, batch_size):
                 batch_idx = indices[start:start + batch_size]
 
+                # Move masks slice to GPU on-demand (avoid storing full 2048×451)
+                mask_batch = torch.as_tensor(masks[batch_idx], dtype=torch.bool, device=device)
                 new_log_probs, entropy, new_values = network.evaluate(
                     states_t[batch_idx],
                     actions_t[batch_idx],
-                    masks_t[batch_idx],
+                    mask_batch,
                 )
 
                 # Clipped policy loss
@@ -506,7 +513,8 @@ def train_ppo(
         # ═══════════════════════════════════════════════════════════════
         # Plot
         # ═══════════════════════════════════════════════════════════════
-        if plot_callback is not None and ep % plot_freq == 0 and ep > 0:
+        if plot_callback is not None and ep - _last_plot_ep >= plot_freq:
+            _last_plot_ep = ep
             plot_callback(
                 save_path,
                 np.array(episode_rewards),
@@ -519,19 +527,23 @@ def train_ppo(
         # ═══════════════════════════════════════════════════════════════
         # Logging
         # ═══════════════════════════════════════════════════════════════
-        if update_count % 5 == 0 or ep >= max_episodes:
+        if update_count % 50 == 0:
             gc.collect()
+        if update_count % 5 == 0 or ep >= max_episodes:
             recent = episode_rewards[-10:] if len(episode_rewards) >= 10 else episode_rewards
             mean_r = np.mean(recent) if recent else 0.0
+            elapsed = time.perf_counter() - t_start
             print(f"Ep {ep:5d}/{max_episodes}  "
                   f"Steps {total_steps_done:7d}  "
                   f"Mean R {mean_r:8.2f}  "
                   f"Policy L {policy_loss.item():.4f}  "
                   f"Value L {value_loss.item():.4f}  "
-                  f"Entropy {entropy.mean().item():.4f}")
+                  f"Entropy {entropy.mean().item():.4f}  "
+                  f"Elapsed {elapsed:.0f}s")
 
         # Periodic save
-        if ep > 0 and ep % _save_freq == 0:
+        if ep - _last_save_ep >= _save_freq:
+            _last_save_ep = ep
             _save_model()
 
     signal.signal(signal.SIGINT, _prev_sigint)

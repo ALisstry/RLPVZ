@@ -235,7 +235,8 @@ def plot_training(save_path, rewards, iterations, loss,
     ax_q.set_xlabel("Update Step")
     ax_q.set_ylabel("Q-Value")
     ax_q.tick_params(labelsize=8)
-    ax_q.legend(fontsize=6, loc="best")
+    if ax_q.get_legend_handles_labels()[0]:
+        ax_q.legend(fontsize=6, loc="best")
     ax_q.grid(True, alpha=0.3)
 
     _plot_metric(axes[1, 3], td_error, "|TD Error|",

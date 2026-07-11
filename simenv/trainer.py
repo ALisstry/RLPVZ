@@ -7,6 +7,7 @@ import os
 import signal
 import shutil
 import subprocess
+import time
 from datetime import datetime
 import numpy as np
 import torch
@@ -251,6 +252,7 @@ def train_sim(
         return
 
     ep = 0
+    t_start = time.perf_counter()
     print(f"Training {max_episodes} episodes...")
 
     while ep < max_episodes and not stop_requested:
@@ -371,13 +373,15 @@ def train_sim(
                     mean_q = np.nanmean(training_mean_q[-step_win:]) if training_mean_q else 0
                     mean_td = np.nanmean(training_td_error[-step_win:]) if training_td_error else 0
                     mean_gn = np.nanmean(training_grad_norm[-step_win:]) if training_grad_norm else 0
+                    elapsed = time.perf_counter() - t_start
                     print(f"Episode {ep:5d}/{max_episodes}  "
                           f"Stage {curriculum.current_stage_name}  "
                           f"stage_episode={curriculum.stage_episode}  "
                           f"Steps {step_count:7d}  "
                           f"Mean R {mean_r:8.2f}  Mean I {mean_i:.2f}  Mean L {mean_l:.2f}  "
                           f"Adv {mean_adv:+.3f}  Ent {mean_ent:.3f}  "
-                          f"Qmean {mean_q:+.2f}  |TD| {mean_td:.3f}  |grad| {mean_gn:.3f}")
+                          f"Qmean {mean_q:+.2f}  |TD| {mean_td:.3f}  |grad| {mean_gn:.3f}  "
+                          f"Elapsed {elapsed:.0f}s")
 
                 if plot_freq and ep % plot_freq == 0:
                     _save_training_artifacts(
