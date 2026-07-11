@@ -189,6 +189,52 @@ def _ddqn_parallel_worker_proc(
         result_queue.put(("error", (worker_id, repr(exc))))
 
 
+def _extract_hidden_sizes_from_state_dict(state_dict: dict, arch: str) -> list[int] | None:
+    """Extract hidden layer sizes from checkpoint state_dict.
+
+    Returns a list of hidden sizes (e.g. ``[256, 128]``) or ``None`` if the
+    architecture does not use configurable hidden sizes (e.g. CNN variants).
+    """
+    if arch in ('cnn', 'cnn_v2'):
+        return None  # CNN architectures have fixed layer sizes
+
+    if arch == 'standard':
+        # network.0.weight → 1st hidden, network.2.weight → 2nd, …
+        # The last ``network.<even>.weight`` is the output layer — exclude it.
+        _weight_keys = sorted(
+            [k for k in state_dict if k.startswith('network.') and k.endswith('.weight')],
+            key=lambda k: int(k.split('.')[1]),
+        )
+        sizes = [int(state_dict[k].shape[0]) for k in _weight_keys]
+        return sizes[:-1] if len(sizes) > 1 else []
+
+    if arch in ('dueling', 'differential'):
+        # Trunk (optional) + branch-in layer
+        trunk_keys = sorted(
+            [k for k in state_dict if k.startswith('trunk.') and k.endswith('.weight')],
+            key=lambda k: int(k.split('.')[1]),
+        )
+        trunk = [int(state_dict[k].shape[0]) for k in trunk_keys]
+        branch_key = (
+            'value_head.0.weight' if arch == 'dueling' else 'wait_head.0.weight'
+        )
+        if branch_key in state_dict:
+            branch_in = int(state_dict[branch_key].shape[0])
+            return trunk + [branch_in]
+        return trunk if trunk else None
+
+    if arch == 'factored':
+        # Shared trunk only (heads are direct Linear to small factor dims)
+        trunk_keys = sorted(
+            [k for k in state_dict if k.startswith('trunk.') and k.endswith('.weight')],
+            key=lambda k: int(k.split('.')[1]),
+        )
+        trunk = [int(state_dict[k].shape[0]) for k in trunk_keys]
+        return trunk if trunk else None
+
+    return None
+
+
 def _detect_architecture_from_state_dict(state_dict: dict) -> str:
     """Detect network architecture from checkpoint keys.
 
@@ -198,6 +244,8 @@ def _detect_architecture_from_state_dict(state_dict: dict) -> str:
     keys = list(state_dict.keys())
     if any(k.startswith('branch_3x3.') for k in keys):
         return 'cnn'
+    if any(k.startswith('row_encoder.') for k in keys) and any(k.startswith('spatial_encoder.') for k in keys):
+        return 'cnn_v2'
     if any(k.startswith('wait_head.') for k in keys):
         return 'differential'
     if any(k.startswith('head_row.') for k in keys) and any(k.startswith('head_col.') for k in keys):
@@ -210,6 +258,7 @@ def _detect_architecture_from_state_dict(state_dict: dict) -> str:
 def _apply_detected_architecture(args, arch: str):
     """Set architecture flags on *args* to force the correct network class."""
     args.use_cnn = (arch == 'cnn')
+    args.use_cnn_v2 = (arch == 'cnn_v2')
     args.use_factored = (arch == 'factored')
     args.use_differential = (arch == 'differential')
     args.use_dueling = (arch == 'dueling')
@@ -234,7 +283,12 @@ def evaluate_ddqn(
     state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
     arch = _detect_architecture_from_state_dict(state_dict)
     _apply_detected_architecture(args, arch)
-    print(f"[Eval][DDQN] Detected architecture: {arch}", flush=True)
+    hidden_sizes = _extract_hidden_sizes_from_state_dict(state_dict, arch)
+    if hidden_sizes is not None:
+        args.ddqn_hidden_sizes = hidden_sizes
+    print(f"[Eval][DDQN] Detected architecture: {arch}"
+          + (f", hidden_sizes={hidden_sizes}" if hidden_sizes else ""),
+          flush=True)
 
     num_workers = max(1, min(num_workers, len(instances)))
     eval_id = new_eval_id("real_ddqn")
@@ -346,6 +400,9 @@ def evaluate_ddqn_state_dict(
     # Auto-detect architecture from state dict keys
     arch = _detect_architecture_from_state_dict(state_dict)
     _apply_detected_architecture(args, arch)
+    hidden_sizes = _extract_hidden_sizes_from_state_dict(state_dict, arch)
+    if hidden_sizes is not None:
+        args.ddqn_hidden_sizes = hidden_sizes
 
     envs = []
     try:
@@ -388,9 +445,18 @@ def _build_eval_envs(args, instances, env_spec, scenario_spec):
 def _build_network(args, env):
     hidden_sizes = _parse_hidden_sizes(getattr(args, "ddqn_hidden_sizes", None))
     use_cnn = getattr(args, "use_cnn", False)
+    use_cnn_v2 = getattr(args, "use_cnn_v2", False)
     if use_cnn:
         from .cnn_network import CNNQNetwork
         network = CNNQNetwork(
+            env,
+            learning_rate=args.ddqn_lr,
+            device="cpu",
+            create_optimizer=False,
+        )
+    elif use_cnn_v2:
+        from .cnn_network import RowFirstCNNQNetwork
+        network = RowFirstCNNQNetwork(
             env,
             learning_rate=args.ddqn_lr,
             device="cpu",
