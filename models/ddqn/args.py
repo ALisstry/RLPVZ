@@ -86,7 +86,13 @@ def add_args(group):
         default=argparse.SUPPRESS,
         help="PER small positive constant to avoid zero priority (default 1e-6)",
     )
-    # ── Differential Q-Network ──
+    group.add_argument(
+        "--ddqn_use_per",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Enable Prioritized Experience Replay (PER, disabled by default)",
+    )
+    # ── Architecture flags ──
     group.add_argument(
         "--use_differential",
         action="store_true",

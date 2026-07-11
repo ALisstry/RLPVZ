@@ -9,7 +9,7 @@ from training.evaluation import EvaluationScheduler
 from training.metrics import load_metric_events, load_training_snapshot
 from utils.train_utils import get_current_stage_name, load_training_config
 
-from .ddqn import PrioritizedReplayBuffer
+from .ddqn import PrioritizedReplayBuffer, UniformReplayBuffer
 from .learner import DDQNLearner
 from .live_plotter import LivePlotter
 from .monitoring import (
@@ -43,16 +43,23 @@ class AsyncDDQNTrainer:
             gamma=args.ddqn_gamma,
         )
         # PER hyper-params (can be overridden via CLI / config in the future)
+        self._use_per = bool(getattr(args, "ddqn_use_per", False))
         self._per_alpha = float(getattr(args, "ddqn_per_alpha", 0.6))
         self._per_beta_start = float(getattr(args, "ddqn_per_beta", 0.4))
         self._per_epsilon = float(getattr(args, "ddqn_per_epsilon", 1e-6))
 
-        self.buffer = PrioritizedReplayBuffer(
-            memory_size=args.ddqn_buffer_size,
-            burn_in=args.ddqn_burn_in,
-            alpha=self._per_alpha,
-            epsilon=self._per_epsilon,
-        )
+        if self._use_per:
+            self.buffer = PrioritizedReplayBuffer(
+                memory_size=args.ddqn_buffer_size,
+                burn_in=args.ddqn_burn_in,
+                alpha=self._per_alpha,
+                epsilon=self._per_epsilon,
+            )
+        else:
+            self.buffer = UniformReplayBuffer(
+                memory_size=args.ddqn_buffer_size,
+                burn_in=args.ddqn_burn_in,
+            )
         self.batch_size = args.ddqn_batch_size
         self.reward_threshold = 30000
         config = load_training_config(getattr(args, "training_config", None))
@@ -76,10 +83,11 @@ class AsyncDDQNTrainer:
         # ── Restore optimizer state, replay buffer & episode count from checkpoint ──
         if restored_extra is not None:
             # PER hyper-params (restore before buffer so they match)
-            if restored_extra.get("per_alpha") is not None:
-                self._per_alpha = float(restored_extra["per_alpha"])
-            if restored_extra.get("per_beta_start") is not None:
-                self._per_beta_start = float(restored_extra["per_beta_start"])
+            if self._use_per:
+                if restored_extra.get("per_alpha") is not None:
+                    self._per_alpha = float(restored_extra["per_alpha"])
+                if restored_extra.get("per_beta_start") is not None:
+                    self._per_beta_start = float(restored_extra["per_beta_start"])
 
             if restored_extra.get("optimizer_state_dict"):
                 self.learner.network.optimizer.load_state_dict(
@@ -91,7 +99,8 @@ class AsyncDDQNTrainer:
                 )
             if restored_extra.get("buffer_data"):
                 from .checkpoint import _deserialize_buffer
-                self.buffer = _deserialize_buffer(restored_extra["buffer_data"])
+                self.buffer = _deserialize_buffer(
+                    restored_extra["buffer_data"], use_per=self._use_per)
                 if self.buffer is not None:
                     self.buffer.burn_in = int(
                         getattr(self.buffer, "burn_in", self.args.ddqn_burn_in)
@@ -227,10 +236,12 @@ class AsyncDDQNTrainer:
                         self._run_overfit_diagnostic()
 
                 if self.transition_count % network_update_frequency == 0:
-                    # PER beta: linear anneal from beta_start → 1.0
-                    beta = self._per_beta_start + (
-                        1.0 - self._per_beta_start
-                    ) * min(1.0, self.stats.episode_count / max(1, max_episodes))
+                    if self._use_per:
+                        beta = self._per_beta_start + (
+                            1.0 - self._per_beta_start
+                        ) * min(1.0, self.stats.episode_count / max(1, max_episodes))
+                    else:
+                        beta = 0.4  # ignored by UniformReplayBuffer
 
                     result = self.learner.update(self.buffer, beta=beta)
                     if result is not None:

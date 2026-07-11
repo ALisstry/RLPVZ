@@ -9,6 +9,7 @@ Key features:
 
 import gc
 import os
+import signal
 from datetime import datetime
 import numpy as np
 import torch
@@ -24,7 +25,11 @@ from simenv.model import transform_observation
 # ═══════════════════════════════════════════════════════════════════════════
 
 class PPONetwork(nn.Module):
-    """Actor-Critic with shared feature extractor and maskable policy head."""
+    """Actor-Critic with shared feature extractor and maskable policy head.
+
+    Uses the same 596-dim typed-onehot observation and 451-action space
+    as the DDQN implementation for fair comparison.
+    """
 
     def __init__(self, env, network_type="cnn", device="cpu"):
         super().__init__()
@@ -32,10 +37,14 @@ class PPONetwork(nn.Module):
         self._rows = config.N_LANES               # 5
         self._cols = config.LANE_LENGTH            # 9
         self._grid_size = self._rows * self._cols  # 45
-        self.n_outputs = env.action_space.n        # 181
+        self.n_outputs = env.action_space.n        # 451
         self.actions = np.arange(self.n_outputs)
-        self._num_cards = len(env.plant_deck)      # 4
+        self._num_cards = env.num_cards            # 10
+        self._n_inputs = int(env.state_dim)        # 596
         self._network_type = network_type
+
+        # One-hot grid channels: num_cards+1 (plant types) + 1 (plant HP) + 1 (zombie HP)
+        self._n_grid_channels = self._num_cards + 3  # 13
 
         if network_type == "cnn":
             self._build_cnn()
@@ -50,54 +59,56 @@ class PPONetwork(nn.Module):
     # ── MLP architectures ──────────────────────────────────────────────
 
     def _build_mlp(self):
-        """Small MLP: 55→128→64 shared trunk."""
-        n_inputs = self._grid_size + self._rows + 1 + self._num_cards  # 55
-
+        """Small MLP: 596→128→64 shared trunk."""
         self.shared = nn.Sequential(
-            nn.Linear(n_inputs, 128), nn.ReLU(),
+            nn.Linear(self._n_inputs, 128), nn.ReLU(),
             nn.Linear(128, 64), nn.ReLU(),
         )
         self.policy_head = nn.Linear(64, self.n_outputs)
         self.value_head = nn.Linear(64, 1)
 
     def _build_deep_mlp(self):
-        """Deep MLP: 55→512→256→128 shared trunk (~848K params)."""
-        n_inputs = self._grid_size + self._rows + 1 + self._num_cards  # 55
-
+        """Deep MLP: 596→2048→2048 shared trunk (same as DDQN default)."""
         self.shared = nn.Sequential(
-            nn.Linear(n_inputs, 512), nn.ReLU(),
-            nn.Linear(512, 256), nn.ReLU(),
-            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(self._n_inputs, 2048), nn.ReLU(),
+            nn.Linear(2048, 2048), nn.ReLU(),
         )
-        self.policy_head = nn.Linear(128, self.n_outputs)
-        self.value_head = nn.Linear(128, 1)
+        self.policy_head = nn.Linear(2048, self.n_outputs)
+        self.value_head = nn.Linear(2048, 1)
 
     # ── CNN architecture ───────────────────────────────────────────────
 
     def _build_cnn(self):
-        """CNN feature extractor with dual-kernel (3×3 + 1×9 row)."""
-        embed_dim = 8
-        self._num_plant_types = self._num_cards + 1  # 0=empty + 4 plants
+        """CNN feature extractor with dual-kernel (3×3 + 1×9 row).
 
-        self.plant_embed = nn.Embedding(self._num_plant_types, embed_dim)
+        Parses the 596-dim typed-onehot observation into 13-channel grid
+        tensors, mirroring the DDQN CNNQNetwork input layout.
+        """
+        embed_dim = 32
+
+        self.plant_embed = nn.Sequential(
+            nn.Linear(self._num_cards + 1, embed_dim, bias=False),
+            nn.ReLU(),
+        )
 
         self.plant_conv3 = nn.Sequential(
-            nn.Conv2d(embed_dim, 16, 3, padding=1), nn.ReLU(),
-            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(embed_dim, 64, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(64, 64, 3, padding=1), nn.ReLU(),
         )
-        self.zombie_conv3 = nn.Sequential(
-            nn.Conv2d(1, 16, 3, padding=1), nn.ReLU(),
-            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(),
+        self.hp_conv3 = nn.Sequential(
+            nn.Conv2d(2, 32, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
         )
         self.plant_conv_row = nn.Sequential(
-            nn.Conv2d(embed_dim, 16, (1, self._cols)), nn.ReLU(),
+            nn.Conv2d(embed_dim, 32, (1, self._cols)), nn.ReLU(),
         )
-        self.zombie_conv_row = nn.Sequential(
-            nn.Conv2d(1, 16, (1, self._cols)), nn.ReLU(),
+        self.hp_conv_row = nn.Sequential(
+            nn.Conv2d(2, 16, (1, self._cols)), nn.ReLU(),
         )
 
-        cnn_dim = 2 * (32 * self._rows * self._cols + 16 * self._rows)  # 3040
-        extra_dim = 1 + self._num_cards                                 # 5
+        cnn_dim = 64 * self._rows * self._cols + 32 * self._rows * self._cols \
+                + 32 * self._rows + 16 * self._rows  # 4560
+        extra_dim = 1 + self._num_cards               # 11  (sun + cooldowns)
 
         self.shared_fc = nn.Sequential(
             nn.Linear(cnn_dim + extra_dim, 256), nn.ReLU(),
@@ -106,10 +117,42 @@ class PPONetwork(nn.Module):
         self.policy_head = nn.Linear(128, self.n_outputs)
         self.value_head = nn.Linear(128, 1)
 
+    # ── Observation parsing ────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_596_to_grid(state_t: torch.Tensor, rows: int, cols: int,
+                           num_cards: int, n_grid_channels: int):
+        """Parse 596-dim typed-onehot into grid tensor + global features.
+
+        596 = sun(1) + cooldowns(num_cards) + plant_onehot(rows*cols*(num_cards+1))
+              + plantHP(rows*cols) + zombieHP(rows*cols)
+
+        Returns:
+            grid: (B, n_grid_channels, rows, cols)  — 13 channels
+            glob_: (B, 1 + num_cards)  — sun + cooldowns
+        """
+        bsz = state_t.shape[0]
+        n_cells = rows * cols
+        n_onehot = num_cards + 1
+
+        glob_ = state_t[:, :1 + num_cards]               # (B, 11)
+        grid_flat = state_t[:, 1 + num_cards:]            # (B, 585)
+
+        split_1 = n_cells * n_onehot                      # 495
+        split_2 = split_1 + n_cells                       # 540
+
+        onehot = grid_flat[:, :split_1].view(bsz, n_cells, n_onehot)
+        plant_hp = grid_flat[:, split_1:split_2].view(bsz, n_cells, 1)
+        zombie_hp = grid_flat[:, split_2:].view(bsz, n_cells, 1)
+
+        grid = torch.cat([onehot, plant_hp, zombie_hp], dim=-1)  # (B, 45, 13)
+        grid = grid.view(bsz, rows, cols, n_grid_channels)
+        grid = grid.permute(0, 3, 1, 2).contiguous()      # (B, 13, rows, cols)
+        return grid, glob_
+
     # ── Feature extraction ─────────────────────────────────────────────
 
     def _extract_features(self, state_t):
-        """Extract features.  Handles (B, 95) and (95,) tensors."""
         if state_t.dim() == 1:
             state_t = state_t.unsqueeze(0)
             squeeze = True
@@ -117,32 +160,28 @@ class PPONetwork(nn.Module):
             squeeze = False
 
         if self._network_type in ("mlp", "deepmlp"):
-            plant_grid = state_t[:, :self._grid_size]
-            zombie_grid = state_t[:, self._grid_size:2 * self._grid_size]
-            zombie_by_lane = torch.sum(
-                zombie_grid.reshape(-1, self._rows, self._cols), dim=-1)
-            state_t = torch.cat(
-                [plant_grid, zombie_by_lane, state_t[:, 2 * self._grid_size:]], dim=1)
             features = self.shared(state_t)
         else:  # cnn
             B = state_t.shape[0]
-            R, C, G = self._rows, self._cols, self._grid_size
+            grid, glob_ = self._parse_596_to_grid(
+                state_t, self._rows, self._cols, self._num_cards,
+                self._n_grid_channels)
 
-            plant_flat = state_t[:, :G].long()
-            zombie_flat = state_t[:, G:2 * G]
-            extra = state_t[:, 2 * G:]
+            # Split grid channels: onehot(11) + plantHP(1) + zombieHP(1)
+            onehot_grid = grid[:, :self._num_cards + 1, :, :]  # (B, 11, R, C)
+            hp_grid     = grid[:, self._num_cards + 1:, :, :]  # (B, 2, R, C)
 
-            p = self.plant_embed(plant_flat)
-            p = p.permute(0, 2, 1).reshape(B, -1, R, C)
-            z = zombie_flat.view(B, 1, R, C)
+            p_embed = self.plant_embed(
+                onehot_grid.permute(0, 2, 3, 1).reshape(-1, self._num_cards + 1)
+            ).reshape(B, self._rows, self._cols, -1).permute(0, 3, 1, 2)
 
-            pf3 = self.plant_conv3(p).reshape(B, -1)
-            zf3 = self.zombie_conv3(z).reshape(B, -1)
-            pfr = self.plant_conv_row(p).reshape(B, -1)
-            zfr = self.zombie_conv_row(z).reshape(B, -1)
+            pf3 = self.plant_conv3(p_embed).reshape(B, -1)
+            zf3 = self.hp_conv3(hp_grid).reshape(B, -1)
+            pfr = self.plant_conv_row(p_embed).reshape(B, -1)
+            zfr = self.hp_conv_row(hp_grid).reshape(B, -1)
 
             features = self.shared_fc(
-                torch.cat([pf3, zf3, pfr, zfr, extra], dim=1))
+                torch.cat([pf3, zf3, pfr, zfr, glob_], dim=1))
 
         if squeeze:
             features = features.squeeze(0)
@@ -249,6 +288,8 @@ def train_ppo(
     network_type="cnn",
     save_path=None,
     eval_episodes=100,
+    plot_callback=None,
+    plot_freq=100,
 ):
     """Train a maskable PPO agent on SimPVZ.
 
@@ -282,7 +323,8 @@ def train_ppo(
         Path to save the trained model.
     """
     if save_path is None:
-        save_path = _default_save_path("ppo", "sim_ppo.pt")
+        tag = f"ppo_{network_type}"
+        save_path = _default_save_path("ppo", "sim_ppo.pt", tag=tag)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     env = SimPVZEnv()
@@ -299,15 +341,44 @@ def train_ppo(
     ep = 0
     total_steps_done = 0
     episode_rewards = []
+    episode_lengths = []
     episode_reward = 0.0
+    episode_steps = 0
     update_count = 0
+    update_losses = []
+    update_policy_losses = []
+    update_value_losses = []
+    update_entropies = []
 
-    while ep < max_episodes:
+    # Periodic save + interrupt handler
+    _save_freq = 10000
+    _saved_on_interrupt = False
+    _stop_requested = False
+    _prev_sigint = signal.getsignal(signal.SIGINT)
+
+    def _save_model():
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        torch.save(network.state_dict(), save_path)
+        np.save(save_path.replace(".pt", "_rewards.npy"), np.array(episode_rewards))
+        print(f"[PPO] Saved model to {save_path} (ep={ep})", flush=True)
+
+    def _handle_interrupt(signum, frame):
+        nonlocal _saved_on_interrupt, _stop_requested
+        _stop_requested = True
+        signal.signal(signal.SIGINT, _prev_sigint)
+        if not _saved_on_interrupt:
+            _saved_on_interrupt = True
+            print("\n[PPO] Interrupted, saving...", flush=True)
+            _save_model()
+
+    signal.signal(signal.SIGINT, _handle_interrupt)
+
+    while ep < max_episodes and not _stop_requested:
         # Phase 1: Rollout — collect on-policy trajectories
         buffer.reset()
         episode_reward = 0.0
 
-        while not buffer.is_full() and ep < max_episodes:
+        while not buffer.is_full() and ep < max_episodes and not _stop_requested:
             mask = env.mask_available_actions()
             action, log_prob, value = network.get_action(state, mask)
             next_state, reward, done, _ = env.step(action)
@@ -315,14 +386,17 @@ def train_ppo(
 
             buffer.add(state, action, reward, done, log_prob, value, mask)
             episode_reward += reward
+            episode_steps += 1
             total_steps_done += 1
 
             state = next_state
             if done:
                 ep += 1
+                episode_lengths.append(episode_steps)
                 state = transform_observation(env.reset())
                 episode_rewards.append(episode_reward)
                 episode_reward = 0.0
+                episode_steps = 0
 
         # Flush partial episode reward
         if episode_reward > 0:
@@ -421,6 +495,23 @@ def train_ppo(
                 optimizer.step()
 
         update_count += 1
+        update_losses.append(loss.item())
+        update_policy_losses.append(policy_loss.item())
+        update_value_losses.append(value_loss.item())
+        update_entropies.append(-entropy_loss.item())
+
+        # ═══════════════════════════════════════════════════════════════
+        # Plot
+        # ═══════════════════════════════════════════════════════════════
+        if plot_callback is not None and ep % plot_freq == 0 and ep > 0:
+            plot_callback(
+                save_path,
+                np.array(episode_rewards),
+                np.array(episode_lengths),
+                np.array(update_losses),
+                advantage=np.array(update_policy_losses) if update_policy_losses else None,
+                entropy=np.array(update_entropies) if update_entropies else None,
+            )
 
         # ═══════════════════════════════════════════════════════════════
         # Logging
@@ -436,13 +527,13 @@ def train_ppo(
                   f"Value L {value_loss.item():.4f}  "
                   f"Entropy {entropy.mean().item():.4f}")
 
-    # ═══════════════════════════════════════════════════════════════════
-    # Save
-    # ═══════════════════════════════════════════════════════════════════
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    torch.save(network.state_dict(), save_path)
-    print(f"Saved model to {save_path}")
-    np.save(save_path.replace(".pt", "_rewards.npy"), np.array(episode_rewards))
+        # Periodic save
+        if ep > 0 and ep % _save_freq == 0:
+            _save_model()
+
+    signal.signal(signal.SIGINT, _prev_sigint)
+    _save_model()
+
     print("Training complete.")
 
     # Evaluation
@@ -452,9 +543,10 @@ def train_ppo(
     _visualize_ppo_episode(env, network)
 
 
-def _default_save_path(algo, filename):
+def _default_save_path(algo, filename, tag=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join("saved", algo, timestamp, filename)
+    folder = timestamp if tag is None else f"{timestamp}_{tag}"
+    return os.path.join("saved", algo, folder, filename)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

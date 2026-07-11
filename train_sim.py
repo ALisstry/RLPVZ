@@ -295,55 +295,78 @@ def plot_training(save_path, rewards, iterations, loss,
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Train DDQN agent on SimPVZ")
+    parser = argparse.ArgumentParser(description="Train DDQN / PPO agent on SimPVZ")
+    parser.add_argument(
+        "--ppo",
+        action="store_true",
+        default=False,
+        help="Use PPO instead of DDQN (on-policy Actor-Critic)",
+    )
+    parser.add_argument(
+        "--ppo_network",
+        type=str,
+        default="deepmlp",
+        choices=["mlp", "deepmlp", "cnn"],
+        help="PPO network type (default: deepmlp)",
+    )
     parser.add_argument(
         "--use_factored",
         action="store_true",
         default=False,
-        help="Use factored Q-Network: MLP 3-factor (card+row+col+wait) or CNN 2-factor (card+pos+wait) when combined with --use_cnn_v2",
+        help="Use factored Q-Network (DDQN only)",
     )
     parser.add_argument(
         "--use_differential",
         action="store_true",
         default=False,
-        help="Use Differential Q-Network: Q(s,a) = Q(s,wait) + Δ(s,a)",
+        help="Use Differential Q-Network (DDQN only)",
     )
     parser.add_argument(
         "--use_cnn_v2",
         action="store_true",
         default=False,
-        help="Use Row-First CNN V2: 1x5 row-encoder -> 3x3 spatial -> GAP (~0.5M params)",
+        help="Use Row-First CNN V2 (DDQN only)",
     )
     parser.add_argument(
         "--hidden_sizes",
         type=int,
         nargs="+",
         default=[2048, 2048],
-        help="Hidden layer sizes (default: 2048 2048)",
+        help="Hidden layer sizes for DDQN (default: 2048 2048)",
     )
     parser.add_argument(
         "--use_per",
         action="store_true",
         default=False,
-        help="Use Prioritized Experience Replay (PER)",
+        help="Use Prioritized Experience Replay (DDQN only)",
     )
     args = parser.parse_args()
 
-    hidden_sizes = args.hidden_sizes if args.hidden_sizes else [2048, 2048]
-    from simenv.trainer import train_sim
-    train_sim(
-        max_episodes=100000,
-        buffer_size=100000,
-        burn_in=10000,
-        batch_size=512,
-        lr=1e-4,
-        network_update_freq=32,
-        network_sync_freq=2000,
-        eval_episodes=100,
-        plot_callback=plot_training,
-        hidden_sizes=hidden_sizes,
-        use_factored=args.use_factored,
-        use_differential=args.use_differential,
-        use_cnn_v2=args.use_cnn_v2,
-        use_per=args.use_per,
-    )
+    if args.ppo:
+        from simenv.ppo import train_ppo
+        train_ppo(
+            max_episodes=100000,
+            network_type=args.ppo_network,
+            eval_episodes=100,
+            plot_callback=plot_training,
+            plot_freq=1000,
+        )
+    else:
+        hidden_sizes = args.hidden_sizes if args.hidden_sizes else [2048, 2048]
+        from simenv.trainer import train_sim
+        train_sim(
+            max_episodes=100000,
+            buffer_size=100000,
+            burn_in=10000,
+            batch_size=512,
+            lr=1e-4,
+            network_update_freq=32,
+            network_sync_freq=2000,
+            eval_episodes=100,
+            plot_callback=plot_training,
+            hidden_sizes=hidden_sizes,
+            use_factored=args.use_factored,
+            use_differential=args.use_differential,
+            use_cnn_v2=args.use_cnn_v2,
+            use_per=args.use_per,
+        )

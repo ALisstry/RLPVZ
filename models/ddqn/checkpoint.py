@@ -76,12 +76,12 @@ def _serialize_buffer(buffer):
     return data
 
 
-def _deserialize_buffer(buffer_data):
-    """Restore replay buffer from serialized dict → PrioritizedReplayBuffer."""
+def _deserialize_buffer(buffer_data, use_per=False):
+    """Restore replay buffer from serialized dict."""
     if buffer_data is None:
         return None
 
-    from .ddqn import PrioritizedReplayBuffer
+    from .ddqn import PrioritizedReplayBuffer, UniformReplayBuffer
 
     n = len(buffer_data["actions"])
     if n <= 0:
@@ -90,15 +90,21 @@ def _deserialize_buffer(buffer_data):
     memory_size = int(buffer_data.get("_memory_size", n))
     memory_size = max(memory_size, n, 1)
     burn_in = int(buffer_data.get("_burn_in", 1))
-    alpha = float(buffer_data.get("_per_alpha", 0.6))
-    epsilon = float(buffer_data.get("_per_epsilon", 1e-6))
 
-    buf = PrioritizedReplayBuffer(
-        memory_size=memory_size,
-        burn_in=burn_in,
-        alpha=alpha,
-        epsilon=epsilon,
-    )
+    if use_per:
+        alpha = float(buffer_data.get("_per_alpha", 0.6))
+        epsilon = float(buffer_data.get("_per_epsilon", 1e-6))
+        buf = PrioritizedReplayBuffer(
+            memory_size=memory_size,
+            burn_in=burn_in,
+            alpha=alpha,
+            epsilon=epsilon,
+        )
+    else:
+        buf = UniformReplayBuffer(
+            memory_size=memory_size,
+            burn_in=burn_in,
+        )
 
     start_index = int(buffer_data.get("_per_ptr", n % memory_size))
     if n < memory_size:

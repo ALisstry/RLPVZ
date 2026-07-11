@@ -331,6 +331,59 @@ class SumTree:
         return indices
 
 
+class UniformReplayBuffer:
+    """Simple fixed-size ring buffer with uniform random sampling.
+
+    Same interface as :class:`PrioritizedReplayBuffer` but without the
+    SumTree or importance-sampling overhead.  ``sample_batch`` returns
+    just a ``batch`` tuple, and ``update_priorities`` is a no-op.
+    """
+
+    def __init__(self, memory_size=50000, burn_in=10000):
+        self.memory_size = memory_size
+        self.burn_in = burn_in
+        self.Buffer = namedtuple(
+            "Buffer",
+            field_names=[
+                "state", "action", "reward", "done",
+                "next_state", "mask", "next_mask",
+            ],
+        )
+        self.replay_memory = [None] * memory_size
+        self._write_ptr = 0
+        self._size = 0
+
+    def __len__(self) -> int:
+        return self._size
+
+    def burn_in_capacity(self) -> float:
+        return self._size / max(1, self.burn_in)
+
+    def append(self, state, action, reward, done, next_state, mask, next_mask):
+        self.replay_memory[self._write_ptr] = self.Buffer(
+            state, action, reward, done, next_state, mask, next_mask,
+        )
+        self._write_ptr = (self._write_ptr + 1) % self.memory_size
+        self._size = min(self._size + 1, self.memory_size)
+
+    def sample_batch(self, batch_size=32, beta: float = 0.4):
+        """Uniform random sampling — *beta* is accepted and ignored.
+
+        Returns:
+            *(batch, None, None)* — the extra ``None`` values match
+            :class:`PrioritizedReplayBuffer`'s return signature so that
+            callers do not need branching.
+        """
+        n = min(self._size, self.memory_size)
+        samples = np.random.choice(n, batch_size, replace=False)
+        entries = [self.replay_memory[i] for i in samples]
+        return tuple(zip(*entries)), None, None
+
+    def update_priorities(self, tree_indices, td_errors):
+        """No-op — uniform sampling has no priorities."""
+        pass
+
+
 class PrioritizedReplayBuffer:
     """Prioritized Experience Replay (Schaul et al., 2016).
 
