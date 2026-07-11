@@ -546,7 +546,8 @@ def train_ppo(
         # Periodic eval
         if eval_episodes > 0 and ep - _last_eval_ep >= eval_freq_episodes:
             _last_eval_ep = ep
-            _evaluate_ppo(env, network, n_episodes=eval_episodes)
+            _evaluate_ppo(env, network, n_episodes=eval_episodes,
+                          episode=ep, save_path=save_path)
 
         # Periodic save
         if ep - _last_save_ep >= _save_freq:
@@ -559,7 +560,8 @@ def train_ppo(
     print("Training complete.")
 
     # Evaluation
-    _evaluate_ppo(env, network, n_episodes=eval_episodes)
+    _evaluate_ppo(env, network, n_episodes=eval_episodes,
+                  episode=ep, save_path=save_path)
 
     # Visualize
     _visualize_ppo_episode(env, network)
@@ -575,11 +577,15 @@ def _default_save_path(algo, filename, tag=None):
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _evaluate_ppo(env, network, n_episodes=100):
-    """Run N episodes with greedy policy and report statistics."""
+def _evaluate_ppo(env, network, n_episodes=100, episode=0, save_path=None):
+    """Run N episodes with greedy policy and report statistics.
+
+    Results are appended to ``eval.csv`` next to *save_path* so the
+    training dashboard can pick them up.
+    """
     sep = "-" * 58
     print(f"\n{sep}")
-    print(f"  PPO Evaluation ({n_episodes} episodes)")
+    print(f"  PPO Evaluation ({n_episodes} episodes, ep={episode})")
     print(f"{sep}")
 
     rewards = []
@@ -594,7 +600,7 @@ def _evaluate_ppo(env, network, n_episodes=100):
         steps = 0
         while not done:
             mask = env.mask_available_actions()
-            action, _, _ = network.get_action(state, mask)  # already @torch.no_grad()
+            action, _, _ = network.get_action(state, mask)
             state, reward, done, _ = env.step(action)
             state = transform_observation(state)
             total_reward += reward
@@ -621,6 +627,22 @@ def _evaluate_ppo(env, network, n_episodes=100):
     survived_full = (survivals >= max_frames).sum()
     print(f"  {'Full survival:':20s} {survived_full}/{n_episodes} ({100 * survived_full / n_episodes:.1f}%)")
     print(f"{sep}\n")
+
+    # Write to eval.csv for dashboard
+    if save_path is not None:
+        import csv
+        output_dir = os.path.dirname(save_path)
+        eval_path = os.path.join(output_dir, "eval.csv")
+        file_exists = os.path.isfile(eval_path)
+        with open(eval_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["episode", "reward_mean", "survival_mean"])
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({
+                "episode": episode,
+                "reward_mean": float(rewards.mean()),
+                "survival_mean": float(survivals.mean()),
+            })
 
 
 def _print_ppo_config(loc):
