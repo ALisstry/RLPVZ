@@ -193,7 +193,10 @@ class PPONetwork(nn.Module):
         """Return (masked_logits, values)."""
         if isinstance(state, (list, tuple)):
             state = np.array([np.ravel(s) for s in state])
-        state_t = torch.FloatTensor(state).to(self.device)
+        if isinstance(state, torch.Tensor):
+            state_t = state.to(dtype=torch.float32, device=self.device)
+        else:
+            state_t = torch.as_tensor(state, dtype=torch.float32, device=self.device)
         features = self._extract_features(state_t)
 
         logits = self.policy_head(features)
