@@ -54,13 +54,16 @@ def _print_network_summary(network, use_paper, hidden_sizes, device):
     trainable_params = sum(p.numel() for p in network.parameters() if p.requires_grad)
 
     is_cnn = hasattr(network, '_n_grid_channels')
+    is_cnn_v2 = hasattr(network, 'row_encoder')
     is_mlp_factored = hasattr(network, 'head_row') and hasattr(network, 'head_col')
     is_differential = hasattr(network, '_wait_idx') and not is_cnn
     is_dueling = hasattr(network, 'value_head') and not is_cnn
 
     arch_tags = []
-    if is_cnn:
-        arch_tags.append("CNN")
+    if is_cnn_v2:
+        arch_tags.append("CNN-v2(RowFirst)")
+    elif is_cnn:
+        arch_tags.append("CNN-v1(DualBranch)")
     if is_mlp_factored:
         arch_tags.append("Factored")
     if is_differential:
@@ -77,8 +80,10 @@ def _print_network_summary(network, use_paper, hidden_sizes, device):
     print(f"  Actions:       {n_outputs}")
     if is_mlp_factored:
         print(f"  Action heads:  card(10) + row(5) + col(9) + wait(1) = 25 → enumerate → 451")
-    if is_cnn:
-        print(f"  Architecture:  3x3-CNN + 1x9-CNN | global-MLP -> head")
+    if is_cnn_v2:
+        print(f"  Architecture:  Row-Encoder(1x5) -> Spatial-Encoder(3x3) -> GAP | global-MLP -> head")
+    elif is_cnn:
+        print(f"  Architecture:  3x3-CNN + 1x3-CNN | global-MLP -> head")
     elif is_mlp_factored:
         hidden_str = " -> ".join(str(h) for h in (hidden_sizes or [256, 128]))
         trunk_out = hidden_sizes[-1] if hidden_sizes else (hidden_sizes[0] if hidden_sizes else 256)
@@ -202,7 +207,19 @@ class DDQNAlgorithm:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         use_paper_obs = getattr(context.args, "ddqn_paper_observation", True)
         use_cnn = getattr(context.args, "use_cnn", False)
-        if use_cnn:
+        use_cnn_v2 = getattr(context.args, "use_cnn_v2", False)
+        use_factored = getattr(context.args, "use_factored", False)
+
+        # CNN V2 takes precedence over V1 when both are set
+        if use_cnn_v2:
+            from .cnn_network import RowFirstCNNQNetwork
+            network = RowFirstCNNQNetwork(
+                env,
+                learning_rate=context.args.ddqn_lr,
+                device=device,
+                use_factored=use_factored,
+            )
+        elif use_cnn:
             from .cnn_network import CNNQNetwork
             network = CNNQNetwork(
                 env,
@@ -210,7 +227,6 @@ class DDQNAlgorithm:
                 device=device,
             )
         else:
-            use_factored = getattr(context.args, "use_factored", False)
             use_differential = getattr(context.args, "use_differential", False)
             use_dueling = getattr(context.args, "use_dueling", False)
             if use_factored:

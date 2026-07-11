@@ -97,7 +97,13 @@ def add_args(group):
         "--use_cnn",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="Use CNN-based Q-Network with dual-branch grid processing",
+        help="Use CNN-based Q-Network with dual-branch grid processing (V1)",
+    )
+    group.add_argument(
+        "--use_cnn_v2",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Use Row-First CNN (V2): 1×5 row-encoder → 3×3 spatial → GAP (single-branch, ~0.5M params)",
     )
     group.add_argument(
         "--use_dueling",

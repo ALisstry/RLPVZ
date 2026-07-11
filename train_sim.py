@@ -300,13 +300,19 @@ if __name__ == "__main__":
         "--use_factored",
         action="store_true",
         default=False,
-        help="Use 3-Factor Q-Network: Q(card,row,col) = q_card + q_row + q_col",
+        help="Use factored Q-Network: MLP 3-factor (card+row+col+wait) or CNN 2-factor (card+pos+wait) when combined with --use_cnn_v2",
     )
     parser.add_argument(
         "--use_differential",
         action="store_true",
         default=False,
         help="Use Differential Q-Network: Q(s,a) = Q(s,wait) + Δ(s,a)",
+    )
+    parser.add_argument(
+        "--use_cnn_v2",
+        action="store_true",
+        default=False,
+        help="Use Row-First CNN V2: 1x5 row-encoder -> 3x3 spatial -> GAP (~0.5M params)",
     )
     parser.add_argument(
         "--hidden_sizes",
@@ -338,5 +344,6 @@ if __name__ == "__main__":
         hidden_sizes=hidden_sizes,
         use_factored=args.use_factored,
         use_differential=args.use_differential,
+        use_cnn_v2=args.use_cnn_v2,
         use_per=args.use_per,
     )

@@ -20,6 +20,7 @@ from simenv.pvz_sim import config
 from simenv.model import (
     ReplayBuffer, PrioritizedReplayBuffer,
     DDQNNetwork, DifferentialDDQNNetwork, FactoredDDQNNetwork,
+    RowFirstCNNQNetwork,
     transform_observation, calculate_loss, LossResult,
 )
 from training.evaluation import (
@@ -68,6 +69,7 @@ def train_sim(
     plot_callback=None,
     use_differential=False,
     use_factored=False,
+    use_cnn_v2=False,
     hidden_sizes=None,
     use_per=False,
     per_alpha=0.6,
@@ -78,6 +80,7 @@ def train_sim(
         config_tag = _build_config_tag(
             use_factored=use_factored, use_differential=use_differential,
             use_per=use_per, hidden_sizes=hidden_sizes,
+            use_cnn_v2=use_cnn_v2,
         )
         save_path = _default_save_path("ddqn", "sim_ddqn.pt", tag=config_tag)
     output_dir = os.path.dirname(save_path) or "."
@@ -107,14 +110,27 @@ def train_sim(
     )
     if getattr(curriculum, "enabled", True):
         env.apply_stage(curriculum.current_stage)
-    if use_factored:
+    if use_cnn_v2:
+        network = RowFirstCNNQNetwork(
+            env, learning_rate=lr, device=device,
+            hidden_sizes=hidden_sizes,
+            use_factored=use_factored,
+        )
+        network_type_str = "ddqn_cnn_v2_factored" if use_factored else "ddqn_cnn_v2"
+    elif use_factored:
         NetworkCls = FactoredDDQNNetwork
     elif use_differential:
         NetworkCls = DifferentialDDQNNetwork
     else:
         NetworkCls = DDQNNetwork
-    network = NetworkCls(env, learning_rate=lr, device=device,
-                         hidden_sizes=hidden_sizes)
+    if not use_cnn_v2:
+        network = NetworkCls(env, learning_rate=lr, device=device,
+                             hidden_sizes=hidden_sizes)
+        network_type_str = (
+            "ddqn_factored" if use_factored
+            else "ddqn_differential" if use_differential
+            else "ddqn"
+        )
     target_network = deepcopy(network)
     if use_per:
         buffer = PrioritizedReplayBuffer(
@@ -131,11 +147,7 @@ def train_sim(
 
     _print_config(
         device=device,
-        network_type=(
-            "ddqn_factored" if use_factored
-            else "ddqn_differential" if use_differential
-            else "ddqn"
-        ),
+        network_type=network_type_str,
         network_params=sum(p.numel() for p in network.parameters()),
         hidden_sizes=_network_hidden_sizes(network),
         max_episodes=max_episodes,
@@ -610,9 +622,12 @@ def _copy_if_exists(src, dst):
 def _network_hidden_sizes(network):
     """Extract hidden layer sizes from a DDQN network.
 
-    Handles both plain ``nn.Sequential`` (``self.network``) and
-    Differential / Dueling architectures (``self.trunk``).
+    Handles plain ``nn.Sequential`` (``self.network``), Differential / Dueling
+    architectures (``self.trunk``), and CNN architectures (``self.row_encoder``).
     """
+    # CNN: return empty list — hidden_sizes is not meaningful
+    if hasattr(network, "row_encoder"):
+        return []
     sequential = getattr(network, "network", None)
     if sequential is not None:
         source = sequential
@@ -844,15 +859,21 @@ def _save_training_artifacts(
 
 
 def _build_config_tag(use_factored=False, use_differential=False,
-                      use_per=False, hidden_sizes=None):
+                      use_per=False, hidden_sizes=None,
+                      use_cnn_v2=False):
     """Build a short directory tag from config options for run identification."""
     parts = []
-    hs = hidden_sizes or [2048, 2048]
-    parts.append("h" + "-".join(str(h) for h in hs))
-    if use_factored:
-        parts.append("fact")
-    elif use_differential:
-        parts.append("diff")
+    if use_cnn_v2:
+        parts.append("cnnv2")
+        if use_factored:
+            parts.append("fact")
+    else:
+        hs = hidden_sizes or [2048, 2048]
+        parts.append("h" + "-".join(str(h) for h in hs))
+        if use_factored:
+            parts.append("fact")
+        elif use_differential:
+            parts.append("diff")
     if use_per:
         parts.append("per")
     return "_".join(parts)
