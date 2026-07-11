@@ -292,6 +292,7 @@ def train_ppo(
     network_type="cnn",
     save_path=None,
     eval_episodes=100,
+    eval_freq_episodes=2500,
     plot_callback=None,
     plot_freq=100,
 ):
@@ -356,6 +357,7 @@ def train_ppo(
     update_entropies = []
     _last_plot_ep = 0
     _last_save_ep = 0
+    _last_eval_ep = 0
 
     # Periodic save + interrupt handler
     _save_freq = 10000
@@ -540,6 +542,11 @@ def train_ppo(
                   f"Value L {value_loss.item():.4f}  "
                   f"Entropy {entropy.mean().item():.4f}  "
                   f"Elapsed {elapsed:.0f}s")
+
+        # Periodic eval
+        if eval_episodes > 0 and ep - _last_eval_ep >= eval_freq_episodes:
+            _last_eval_ep = ep
+            _evaluate_ppo(env, network, n_episodes=eval_episodes)
 
         # Periodic save
         if ep - _last_save_ep >= _save_freq:
