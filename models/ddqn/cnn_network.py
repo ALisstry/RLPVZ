@@ -15,7 +15,7 @@ import torch.nn as nn
 class CNNQNetwork(nn.Module):
     def __init__(self, env, learning_rate=1e-3, device="cpu",
                  hidden_sizes=None, n_inputs_override=None,
-                 create_optimizer=True, use_factored: bool = False):
+                 create_optimizer=True):
         super().__init__()
         self.device = device
         self.rows = env.rows
@@ -24,9 +24,6 @@ class CNNQNetwork(nn.Module):
         self.n_outputs = env.action_space.n
         self.actions = np.arange(env.action_space.n)
         self.learning_rate = learning_rate
-        self._use_factored = use_factored
-        self._n_cells = self.rows * self.cols  # 45
-        self._n_cards = self.num_cards          # 10
 
         # ── derived dims ──────────────────────────────────────────
         n_grid_channels = self.num_cards + 1 + 2   # one-hot(11) + plantHP(1) + zombieHP(1)
@@ -96,33 +93,11 @@ class CNNQNetwork(nn.Module):
 
         # ── output head ───────────────────────────────────────────
         shared_dim = 1024 + 128  # 1152
-        if use_factored:
-            # Factored heads: wait(1) + position(45) + card(10) = 56
-            shared = nn.Sequential(
-                nn.Linear(shared_dim, 512),
-                nn.ReLU(inplace=True),
-            )
-            self.head_wait = nn.Sequential(
-                shared,
-                nn.Linear(512, 1),
-            )
-            self.head_pos = nn.Sequential(
-                nn.Linear(shared_dim, 256),
-                nn.ReLU(inplace=True),
-                nn.Linear(256, self._n_cells),   # 45
-            )
-            self.head_card = nn.Sequential(
-                nn.Linear(shared_dim, 128),
-                nn.ReLU(inplace=True),
-                nn.Linear(128, self._n_cards),   # 10
-            )
-            self.head = None  # factored heads replace the monolithic head
-        else:
-            self.head = nn.Sequential(
-                nn.Linear(shared_dim, 768),
-                nn.ReLU(inplace=True),
-                nn.Linear(768, self.n_outputs),
-            )
+        self.head = nn.Sequential(
+            nn.Linear(shared_dim, 768),
+            nn.ReLU(inplace=True),
+            nn.Linear(768, self.n_outputs),
+        )
 
         if device == "cuda":
             self.cuda()
@@ -177,17 +152,7 @@ class CNNQNetwork(nn.Module):
         glob_feat = self.global_proj(glob_)
         shared = torch.cat([grid_feat, glob_feat], dim=1)  # (B, 1152)
 
-        if self._use_factored:
-            q_wait = self.head_wait(shared)                      # (B, 1)
-            q_pos  = self.head_pos(shared)                       # (B, 45)
-            q_card = self.head_card(shared)                      # (B, 10)
-
-            # Outer sum: Q(card, cell) = q_card[card] + q_pos[cell]
-            q_plant = q_card.unsqueeze(-1) + q_pos.unsqueeze(-2)  # (B, 10, 45)
-            q_plant = q_plant.reshape(bsz, 450)                   # (B, 450)
-            return torch.cat([q_plant, q_wait], dim=-1)           # (B, 451)
-        else:
-            return self.head(shared)                              # (B, 451)
+        return self.head(shared)                              # (B, 451)
 
     # ── DDQN interface ─────────────────────────────────────────────
     def decide_action(self, state, mask, epsilon):

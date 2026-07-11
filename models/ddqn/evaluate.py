@@ -390,13 +390,11 @@ def _build_network(args, env):
     use_cnn = getattr(args, "use_cnn", False)
     if use_cnn:
         from .cnn_network import CNNQNetwork
-        use_factored = getattr(args, "use_factored", False)
         network = CNNQNetwork(
             env,
             learning_rate=args.ddqn_lr,
             device="cpu",
             create_optimizer=False,
-            use_factored=use_factored,
         )
     else:
         use_factored = getattr(args, "use_factored", False)

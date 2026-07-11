@@ -64,7 +64,7 @@ def train_sim(
     eval_freq_episodes=2500,
     max_grad_norm=0.5,
     visualize=False,
-    plot_freq=100,
+    plot_freq=1000,
     plot_callback=None,
     use_differential=False,
     use_factored=False,

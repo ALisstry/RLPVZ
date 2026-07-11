@@ -109,5 +109,5 @@ def add_args(group):
         "--use_factored",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="Use factored action heads in CNN Q-Network",
+        help="Use 3-Factor Q-Network: Q(card,row,col) = q_card + q_row + q_col (MLP)",
     )
