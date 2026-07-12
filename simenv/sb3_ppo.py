@@ -3,7 +3,9 @@
 import csv
 import os
 import time
+from collections import deque
 from datetime import datetime
+from itertools import islice
 
 import gymnasium as gym
 import numpy as np
@@ -73,6 +75,16 @@ class TrainCallback(BaseCallback):
         self._last_save_ep = 0
         self._last_eval_ep = 0
         self._ep = 0
+        self._reward_history = []
+        self._length_history = []
+
+    def _init_callback(self) -> None:
+        # Expand sb3's ep_info_buffer so we don't lose history
+        buf = self.model.ep_info_buffer
+        if buf is None:
+            self.model.ep_info_buffer = deque(maxlen=100000)
+        else:
+            self.model.ep_info_buffer = deque(buf, maxlen=100000)
 
     @staticmethod
     def _est_ep(num_timesteps: int) -> int:
@@ -87,6 +99,16 @@ class TrainCallback(BaseCallback):
         return True
 
     def _on_episode(self, ep):
+        # Sync episode history from sb3 buffer (only copy new entries)
+        n_model_eps = len(self.model.ep_info_buffer)
+        n_my_eps = len(self._reward_history)
+        if n_model_eps > n_my_eps:
+            for info in islice(self.model.ep_info_buffer, n_my_eps, None):
+                if 'r' in info:
+                    self._reward_history.append(info['r'])
+                if 'l' in info:
+                    self._length_history.append(info['l'])
+
         # Console log (every 100 ep to avoid spam)
         if ep % 100 == 0:
             elapsed = time.perf_counter() - self._t_start
@@ -113,15 +135,12 @@ class TrainCallback(BaseCallback):
             print(f"[PPO] Saved model (ep~{ep})", flush=True)
 
     def _do_plot(self, ep):
-        """Generate dashboard with available data."""
-        rewards = []
-        for info in self.model.ep_info_buffer:
-            if 'r' in info:
-                rewards.append(info['r'])
-        rewards = np.array(rewards) if rewards else np.zeros(1)
+        """Generate dashboard with accumulated episode history."""
+        rewards = np.array(self._reward_history) if self._reward_history else np.zeros(1)
+        iterations = np.array(self._length_history) if self._length_history else np.zeros(1)
         self._plot_callback(
             self._save_path.replace(".zip", ".pt"),
-            rewards, np.array([]), np.array([]),
+            rewards, iterations, np.array([]),
         )
 
     def _run_eval(self, ep):

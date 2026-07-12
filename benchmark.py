@@ -352,21 +352,318 @@ def evaluate_random(
     )
 
 
+def evaluate_sim_ppo(
+    args,
+    model_path,
+    instances,
+    env_spec,
+    scenario_spec,
+    episodes,
+    num_workers=1,
+):
+    """Evaluate a simenv-trained PPO model (PPONetwork) on the real PVZ env.
+
+    Simenv PPO saves a raw ``PPONetwork`` state-dict (``.pt``), which is
+    incompatible with the SB3 ``MaskablePPO`` format used by the standard
+    ``evaluate_ppo`` path.  This function provides a bridge: it loads the
+    simenv checkpoint, wraps it in a thin SB3-compatible interface, and
+    reuses the same real-PVZ evaluation pipeline.
+    """
+    import torch
+    import numpy as np
+    from models.ddqn.adapter import typed_onehot_state_dim
+    from models.ppo.env import get_env as get_ppo_env
+    from simenv.ppo import PPONetwork
+
+    if not instances:
+        raise ValueError("SimPPO eval requires at least one game instance")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"SimPPO model not found: {model_path}")
+
+    num_workers = max(1, min(num_workers, len(instances)))
+    eval_id = new_eval_id("real_sim_ppo")
+    start_time = time_eval_run()
+
+    # ── Load checkpoint ──────────────────────────────────────────────
+    # Some simenv checkpoints may use an older PyTorch zip format.
+    try:
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
+    except RuntimeError:
+        print(
+            "[Eval][SimPPO] weights_only=True failed, retrying with "
+            "weights_only=False (old checkpoint format)",
+            flush=True,
+        )
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+
+    # Detect network_type from state-dict keys
+    if "plant_embed.0.weight" in checkpoint:
+        network_type = "cnn"
+    elif "shared.0.weight" in checkpoint:
+        out_dim = checkpoint["shared.0.weight"].shape[0]
+        if out_dim == 2048:
+            network_type = "deepmlp"
+        else:
+            network_type = "mlp"
+    else:
+        raise ValueError(
+            f"Unknown simenv PPO architecture in checkpoint: {list(checkpoint.keys())[:5]}..."
+        )
+
+    print(
+        f"[Eval][SimPPO] Detected network_type={network_type}",
+        flush=True,
+    )
+
+    # Build a minimal env-like spec for PPONetwork construction
+    class _SimEnvSpec:
+        pass
+
+    spec = _SimEnvSpec()
+    spec.action_space = type("_", (), {"n": env_spec.action_space_size})()
+    spec.num_cards = env_spec.plant_types
+    spec.state_dim = typed_onehot_state_dim(
+        env_spec.rows, env_spec.cols, env_spec.plant_types
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    network = PPONetwork(spec, network_type=network_type, device=device)
+    network.load_state_dict(checkpoint)
+    network.eval()
+
+    # ── SB3-compatible wrapper ───────────────────────────────────────
+    class _SimPPOWrapper:
+        def __init__(self, net):
+            self.net = net
+
+        def predict(self, obs, deterministic=True, action_masks=None):
+            _t = torch.as_tensor(obs, dtype=torch.float32, device=self.net.device)
+            with torch.no_grad():
+                logits, _ = self.net(_t, action_masks)
+            actions = logits.argmax(dim=-1).cpu().numpy()
+            return actions, None
+
+    model = _SimPPOWrapper(network)
+
+    # ── Build real-PVZ env (same pipeline as evaluate_ppo) ───────────
+    # Ensure args are set up for flat-obs vector observation
+    if not hasattr(args, "use_flat_obs"):
+        args.use_flat_obs = True
+    if not hasattr(args, "no_diversify"):
+        args.no_diversify = True   # eval: no diversity perturbations
+    if not hasattr(args, "no_attn"):
+        args.no_attn = True
+    if not hasattr(args, "net"):
+        args.net = "small"
+
+    env = get_ppo_env(
+        args,
+        instances[:num_workers],
+        env_spec=env_spec,
+        scenario_spec=scenario_spec,
+        load_path=None,  # no VecNormalize stats for simenv models
+    )
+
+    # ── Run episodes ─────────────────────────────────────────────────
+    try:
+        env = _ppo_env_for_eval(env)
+    except Exception:
+        pass
+
+    all_details = _run_ppo_episodes(
+        model=model,
+        env=env,
+        episodes=episodes,
+        algo_label="SimPPO",
+    )
+
+    # ── Summarise ────────────────────────────────────────────────────
+    try:
+        env.close()
+    except Exception:
+        pass
+
+    return summarize_eval_results(
+        eval_id=eval_id,
+        algo="sim_ppo",
+        env_kind="real",
+        episode=None,
+        step=None,
+        stage_name="base",
+        win_condition=scenario_spec.win_condition,
+        target_sublevels=scenario_spec.target_sublevels,
+        details=all_details,
+        duration_sec=elapsed_since(start_time),
+        model_path=model_path,
+        extra={
+            "game_mode_id": scenario_spec.game_mode_id,
+            "rows": scenario_spec.rows,
+            "cols": scenario_spec.cols,
+            "initial_sun": scenario_spec.initial_sun,
+            "cards": list(scenario_spec.cards),
+            "plant_stats": summarize_plant_stats(all_details),
+            "diagnostics": summarize_diagnostics(all_details),
+            "network_type": network_type,
+        },
+    )
+
+
+def _ppo_env_for_eval(env):
+    """Set VecNormalize to eval mode (if present)."""
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    current = env
+    while current is not None:
+        if isinstance(current, VecNormalize):
+            current.training = False
+            current.norm_reward = False
+            return env
+        current = getattr(current, "venv", None)
+    return env
+
+
+def _run_ppo_episodes(model, env, episodes, algo_label="PPO"):
+    """Run eval episodes with an SB3-compatible model on a VecEnv.
+
+    Returns a list of ``EpisodeEvalResult``.
+    """
+    from sb3_contrib.common.maskable.utils import get_action_masks
+    import numpy as np
+
+    details = []
+    obs = env.reset()
+
+    episode_reward = 0.0
+    episode_actions = 0
+    _wait_idx = env.action_space.n - 1 if hasattr(env, "action_space") else 0
+    _wait_choice = 0
+    _wait_forced = 0
+
+    while len(details) < episodes:
+        action_masks = get_action_masks(env)
+        actions, _states = model.predict(
+            obs,
+            deterministic=True,
+            action_masks=action_masks,
+        )
+        _act = int(actions[0]) if hasattr(actions, "__len__") else int(actions)
+        if _act == _wait_idx and action_masks is not None:
+            _am = action_masks[0] if hasattr(action_masks, "__len__") else action_masks
+            if _am is not None and len(_am) > 1:
+                if np.any(_am[:-1]):
+                    _wait_choice += 1
+                else:
+                    _wait_forced += 1
+
+        obs, rewards, dones, infos = env.step(actions)
+
+        reward = float(rewards[0]) if hasattr(rewards, "__len__") else float(rewards)
+        done = bool(dones[0]) if hasattr(dones, "__len__") else bool(dones)
+        info = infos[0] if hasattr(infos, "__len__") else infos
+
+        episode_reward += reward
+        episode_actions += 1
+
+        if not done:
+            continue
+
+        episode_index = len(details) + 1
+        _diag = dict(info.get("diagnostics", {}))
+        _diag["step_timing"] = {
+            "wait_choice": _wait_choice,
+            "wait_forced": _wait_forced,
+        }
+        details.append(
+            EpisodeEvalResult(
+                eval_id="",
+                episode_index=episode_index,
+                reward=float(episode_reward),
+                survival=float(
+                    info.get(
+                        "steps",
+                        (info.get("episode") or {}).get("l", episode_actions),
+                    )
+                ),
+                win=bool(info.get("win") is True),
+                game_ended=bool(info.get("game_ended", done)),
+                completed_sublevels=_optional_int(
+                    info.get("completed_sublevels")
+                ),
+                zombies_killed=_optional_int(info.get("zombies_killed")),
+                plants_lost=_optional_int(info.get("plants_lost")),
+                actions=episode_actions,
+                extra={
+                    "current_sublevel_index": info.get(
+                        "current_sublevel_index"
+                    ),
+                    "sublevel_cleared_this_step": info.get(
+                        "sublevel_cleared_this_step"
+                    ),
+                    "plant_stats": info.get("plant_stats", {}),
+                    "diagnostics": _diag,
+                },
+            )
+        )
+        print(
+            f"[Eval][{algo_label}] episode {episode_index}/{episodes} | "
+            f"reward={details[-1].reward:.2f} | "
+            f"survival={details[-1].survival:.0f} | "
+            f"win={details[-1].win} | "
+            f"actions={details[-1].actions} | "
+            f"wait(choice={_wait_choice}, forced={_wait_forced})",
+            flush=True,
+        )
+        episode_reward = 0.0
+        episode_actions = 0
+        _wait_choice = 0
+        _wait_forced = 0
+
+    return details
+
+
 def main(argv=None):
     eval_args, train_argv = _parse_eval_args(argv)
     args = get_args(train_argv)
     if not hasattr(args, "speed"):
         args.speed = 5.0
+
+    # Ensure PPO-related attributes exist (they use argparse.SUPPRESS and
+    # may be absent when the config doesn't declare them).
+    for _attr, _default in [
+        ("no_diversify", True),       # eval: deterministic, no perturbation
+        ("diversify", 0.0),
+        ("no_attn", True),            # eval: MLP policy (flat obs)
+        ("use_flat_obs", True),
+        ("net", "small"),
+        ("frameskip", 4),
+        ("env_console_log_level", "WARNING"),
+        ("file_log_level", "WARNING"),
+    ]:
+        if not hasattr(args, _attr):
+            setattr(args, _attr, _default)
     eval_config = _load_eval_config(args)
     _apply_eval_instance_config(args, eval_args, eval_config)
 
     model_path = (
-        None if eval_args.random
+        None
+        if eval_args.random
         else eval_args.model or get_cached_model_path(args.algo)
     )
-    algo_label = "random" if eval_args.random else args.algo
+    if eval_args.sim_ppo:
+        algo_label = "sim_ppo"
+    elif eval_args.random:
+        algo_label = "random"
+    else:
+        algo_label = args.algo
     output_dir = eval_args.eval_output or _default_benchmark_output(algo_label)
     episodes = eval_args.eval_episodes or 100
+
+    if eval_args.sim_ppo and not model_path:
+        print(
+            "[Benchmark] ERROR: --sim_ppo requires --model <path_to_sim_ppo.pt>",
+            flush=True,
+        )
+        return
 
     env_spec, scenario_spec = build_base_eval_specs(args)
     if eval_args.debug:
@@ -382,6 +679,7 @@ def main(argv=None):
         env_spec=env_spec,
         scenario_spec=scenario_spec,
         random_mode=eval_args.random,
+        algo_label=algo_label,
     )
     instances = prepare_game_instances(args)
     if instances is None:
@@ -392,6 +690,16 @@ def main(argv=None):
         if eval_args.random:
             result = evaluate_random(
                 args=args,
+                instances=instances,
+                env_spec=env_spec,
+                scenario_spec=scenario_spec,
+                episodes=episodes,
+                num_workers=eval_args.eval_workers,
+            )
+        elif eval_args.sim_ppo:
+            result = evaluate_sim_ppo(
+                args=args,
+                model_path=model_path,
                 instances=instances,
                 env_spec=env_spec,
                 scenario_spec=scenario_spec,
@@ -494,6 +802,12 @@ def _parse_eval_args(argv=None):
         type=int,
         default=1,
         help="Number of parallel workers for evaluation (requires multiple game instances)",
+    )
+    parser.add_argument(
+        "--sim_ppo",
+        action="store_true",
+        default=False,
+        help="Evaluate a simenv-trained PPO model (PPONetwork .pt checkpoint)",
     )
     parser.add_argument(
         "--debug",
@@ -624,12 +938,14 @@ def _write_diagnostics(result, output_dir):
 
 
 def _print_eval_metadata(args, model_path, output_dir, episodes,
-                         env_spec, scenario_spec, random_mode=False):
+                         env_spec, scenario_spec, random_mode=False,
+                         algo_label=None):
     sep = "-" * 58
     print(f"\n{sep}")
     print("  Benchmark Configuration")
     print(f"{sep}")
-    algo_label = "random (baseline)" if random_mode else args.algo
+    if algo_label is None:
+        algo_label = "random (baseline)" if random_mode else args.algo
     print(f"  {'Algorithm:':24s} {algo_label}")
     model_label = model_path or "(none — random mode)"
     print(f"  {'Model path:':24s} {model_label}")
