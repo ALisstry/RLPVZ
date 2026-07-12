@@ -638,6 +638,21 @@ def main(argv=None):
         ("frameskip", 4),
         ("env_console_log_level", "WARNING"),
         ("file_log_level", "WARNING"),
+        ("lr", 3e-4),
+        ("n_steps", 2048),
+        ("batch", 64),
+        ("n_epochs", 10),
+        ("start_ent", 0.01),
+        ("end_ent", 0.0),
+        ("ent_decay", "linear"),
+        ("load", None),
+        ("save_path", None),
+        ("save_freq", 10000),
+        ("ppo_plot_freq", 0),
+        ("ppo_plot_path", None),
+        ("timesteps", None),
+        ("ppo_gamma", 0.99),
+        ("no_failure_priority", False),
     ]:
         if not hasattr(args, _attr):
             setattr(args, _attr, _default)
