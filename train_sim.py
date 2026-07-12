@@ -344,7 +344,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.ppo:
-        from simenv.ppo import train_ppo
+        from simenv.sb3_ppo import train_ppo
         train_ppo(
             max_episodes=100000,
             network_type=args.ppo_network,
