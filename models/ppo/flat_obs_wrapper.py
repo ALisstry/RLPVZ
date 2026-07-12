@@ -39,8 +39,12 @@ class FlatPaperObsWrapper(ObservationWrapper):
         self._card_plant_ids = list(self._pvz_env.card_plant_ids)
 
         n_obs = 1 + num_cards + rows * cols * (num_cards + 1) + 2 * rows * cols
+        # Use (-inf, inf) bounds for compatibility with simenv-trained SB3
+        # models (SimPVZGymEnv uses Box(-inf, inf, (596,))).  The actual
+        # observation values remain in [0, 1]; this only affects SB3's
+        # observation_space equality check during model loading.
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(n_obs,), dtype=np.float32,
+            low=-np.inf, high=np.inf, shape=(n_obs,), dtype=np.float32,
         )
 
     def observation(self, obs: dict) -> np.ndarray:
