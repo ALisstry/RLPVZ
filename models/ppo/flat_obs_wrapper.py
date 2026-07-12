@@ -45,7 +45,7 @@ class FlatPaperObsWrapper(ObservationWrapper):
 
     def observation(self, obs: dict) -> np.ndarray:
         from models.ddqn.adapter import (
-            build_paper_state_vector,
+            build_typed_onehot_state_vector,
             _extract_card_cooldowns,
         )
 
@@ -65,7 +65,7 @@ class FlatPaperObsWrapper(ObservationWrapper):
         )
         sun = game_state.sun if game_state else 50
 
-        return build_paper_state_vector(
+        return build_typed_onehot_state_vector(
             obs=obs,
             action_mask=action_mask,
             sun=sun,
